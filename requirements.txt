@@ -5,8 +5,8 @@
 #   pip install torch --index-url https://download.pytorch.org/whl/cu121
 #   pip install vllm
 
-# --- 训练框架（版本已核实，GRPO gym env 集成需要 >=4.5.3）---
-ms-swift>=4.5.3
+# --- 训练框架（GRPO gym env 集成已在 4.5.2 实测兼容；>=4.5.2 即可）---
+ms-swift>=4.5.2
 trl>=0.20            # ms-swift 硬要求
 
 # --- 数据处理 ---

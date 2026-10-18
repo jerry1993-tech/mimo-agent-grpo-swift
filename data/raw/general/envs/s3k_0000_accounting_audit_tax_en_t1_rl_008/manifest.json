@@ -1,0 +1,89 @@
+{
+ "cwd": "/work/workspace",
+ "uploads": [
+  {
+   "source": "workspace",
+   "target": "/work/workspace",
+   "container": "main"
+  },
+  {
+   "source": "system",
+   "target": "/work/system",
+   "container": "sidecar"
+  },
+  {
+   "source": "tools",
+   "target": "/work/tools",
+   "container": "sidecar"
+  },
+  {
+   "source": "sidecar_entrypoint.py",
+   "target": "/installed-agent/sidecar_entrypoint.py",
+   "container": "sidecar"
+  },
+  {
+   "source": "mcp_http.py",
+   "target": "/installed-agent/mcp_http.py",
+   "container": "sidecar"
+  },
+  {
+   "source": "mcp_bridge.py",
+   "target": "/work/_setup/mcp_bridge.py",
+   "container": "main"
+  }
+ ],
+ "setup": {
+  "command": "python3 /installed-agent/sidecar_entrypoint.py --start-and-detach",
+  "container": "sidecar",
+  "timeout_sec": 300
+ },
+ "wait_ports": [
+  39101,
+  39102,
+  39103,
+  39104
+ ],
+ "mcp_servers": [
+  {
+   "name": "dealcloud_disposition_workspace",
+   "url": "http://127.0.0.1:39101/mcp"
+  },
+  {
+   "name": "kpmg_tax_modeling_hub",
+   "url": "http://127.0.0.1:39102/mcp"
+  },
+  {
+   "name": "sharepoint_tax_governance_library",
+   "url": "http://127.0.0.1:39103/mcp"
+  },
+  {
+   "name": "yardi_property_asset_register",
+   "url": "http://127.0.0.1:39104/mcp"
+  }
+ ],
+ "verifier": {
+  "uploads": [
+   {
+    "source": "verify.py",
+    "target": "/work/verify.py"
+   },
+   {
+    "source": "verifier_meta.json",
+    "target": "/work/verifier_meta.json"
+   },
+   {
+    "source": "_helpers.py",
+    "target": "/work/_helpers.py"
+   },
+   {
+    "source": "run_verify.py",
+    "target": "/work/run_verify.py"
+   }
+  ],
+  "command": "python3 /work/run_verify.py",
+  "reward_file": "/logs/verifier/reward.json",
+  "reward_detail_file": "/logs/verifier/reward_detail.json",
+  "timeout_sec": null,
+  "env_passthrough": null
+ }
+}

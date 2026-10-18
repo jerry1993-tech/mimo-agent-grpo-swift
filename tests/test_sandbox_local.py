@@ -34,7 +34,12 @@ async def test_timeout():
 
 async def test_path_traversal_blocked():
     async with get_backend(_spec()) as b:
+        # ../ 逃逸出 root：必须拦截
         with pytest.raises(ValueError):
             await b.read_file('../../etc/passwd')
+        # 容器语义的绝对路径映射进 root（local 模拟容器文件系统），不越界
+        await b.write_file('/work/a.txt', 'x')
+        assert await b.read_file('/work/a.txt') == 'x'
+        # 相对 .. 逃逸同样拦截
         with pytest.raises(ValueError):
-            await b.write_file('/etc/evil', 'x')
+            await b.write_file('dir/../../evil', 'x')

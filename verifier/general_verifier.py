@@ -1,16 +1,23 @@
-"""General 域评判器：LLM-as-judge 对 rubric 逐条 1/0，取均值 B。
+"""General 域评判器：容器内官方 verify 优先，LLM-as-judge rubric 兜底。
 
-对齐小米 rubric_judge：
-- 每条 rubric（verifier_meta.items：含 id/weight/question/pass_anchor/method）独立判 1/0；
-- B = 加权均值（缺权等权）；
-- 可选分级 rubric 给出 S（所达等级分），按 w=0.5 合成 w·S+(1−w)·B；
-- 判官未配置 / 调用失败 / doer 最终答案读不到 = is_infra（不是模型 0 分）。
+对齐小米 rubric_judge / run_verify.py：
+- 主路径（与上游一致）：manifest.json 的 verifier 块声明 verify 脚本上传与运行命令；
+  在容器内跑 ``run_verify.py``（读 agent 最终回答 + system/*/state.db post_state +
+  LLM judge），从 ``reward.json`` 读分数。score 即官方加权分。
+  （setup_general_env 已把 env_task_dir 的文件按 manifest 装进容器；本 verifier
+  只需补 verifier.uploads 的文件、写 agent_output 日志、跑 command、读 reward。）
+- 兜底路径（官方脚本缺失/失败时）：对 rubric（verifier_meta.items）逐条 LLM 判 1/0，
+  B=加权均值，可选分级 S 按 w=0.5 合成。与上游同构但非官方实现。
+- 官方脚本失败 = infra（不是模型 0 分）；兜底路径 judge 未配置也 = infra。
 
 参考：
-- https://github.com/XiaomiMiMo/mimoagent/blob/main/src/mimoagent/environments/rubric_judge.py
+- https://github.com/XiaomiMiMo/mimoagent/blob/mimo-oss/src/mimoagent/environments/rubric_judge.py
+- 数据集 general/envs/<task>/run_verify.py（官方打分入口）
 """
 from __future__ import annotations
 
+import base64
+import json
 import os
 import sys
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,12 +27,16 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from sandbox.base import SandboxBackend  # noqa: E402
+from sandbox.general_env_setup import find_env_task_dir, GeneralEnvError  # noqa: E402
 from verifier.base import VerificationResult, Verifier, register_verifier  # noqa: E402
 from verifier.llm_judge import (  # noqa: E402
     JudgeError, judge_batch, judge_configured, resolve_judge_config,
 )
 
 _SYNTH_W = 0.5  # w·S + (1−w)·B，与小米默认一致
+
+# agent 最终回答的日志路径（run_verify.py 的 extract_agent_output 从这里读）
+_AGENT_OUTPUT_SESSION = '/tmp/agent_output/sessions/main.jsonl'
 
 
 def _items(rubrics: Any) -> List[Dict[str, Any]]:
@@ -42,6 +53,99 @@ def _items(rubrics: Any) -> List[Dict[str, Any]]:
 class GeneralVerifier(Verifier):
     domain = 'general'
 
+    # ------------------------------------------------------------------
+    # 主路径：容器内官方 verify（manifest.verifier）
+    # ------------------------------------------------------------------
+    async def _official_verify(self, backend: SandboxBackend,
+                               answer: str) -> Optional[VerificationResult]:
+        """按 manifest.verifier 在容器内跑官方打分。返回 None 表示无官方脚本可跑。
+
+        官方脚本内部使用容器绝对路径（/work、/logs、/tmp/agent_output 等），
+        仅在隔离后端（docker/remote）下可用；local 后端（宿主机临时目录模拟）
+        无法满足脚本内路径契约，直接跳过主路径。
+        """
+        if getattr(backend, 'name', '') == 'local':
+            return None
+        local_dir = find_env_task_dir(self.spec)
+        if local_dir is None:
+            return None
+        manifest_path = os.path.join(local_dir, 'manifest.json')
+        if not os.path.isfile(manifest_path):
+            return None
+        with open(manifest_path, encoding='utf-8') as f:
+            manifest = json.load(f)
+        verifier = manifest.get('verifier') or {}
+        if not verifier.get('command'):
+            return None
+
+        # 1) verifier.uploads：本地 -> 容器
+        from sandbox.general_env_setup import _put_file
+        for up in verifier.get('uploads') or []:
+            src = os.path.join(local_dir, str(up.get('source', '')))
+            dst = str(up.get('target', ''))
+            if src and dst and os.path.isfile(src):
+                try:
+                    await _put_file(backend, src, dst)
+                except Exception as e:
+                    return self.infra_failure(f'verifier upload failed: {e!r}')
+
+        # 2) 写 agent 最终回答（run_verify.extract_agent_output 的输入契约：
+        #    /tmp/agent_output/sessions/**/*.jsonl，每行一个 assistant 事件。
+        #    base64 落盘避免任何 shell 引号/转义问题）
+        event = {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': answer}]}}
+        line = json.dumps(event, ensure_ascii=False)
+        b64 = base64.b64encode(line.encode('utf-8')).decode('ascii')
+        res = await backend.exec(
+            f'mkdir -p /tmp/agent_output/sessions '
+            f'&& printf %s {b64} | base64 -d > {_AGENT_OUTPUT_SESSION}',
+            timeout=30.0, cwd='/')
+        if res.returncode != 0:
+            return self.infra_failure(f'write agent_output failed: {res.output[:200]}')
+
+        # 3) 跑官方 verify 命令
+        timeout = float(verifier.get('timeout_sec') or self.spec.verifier_timeout_sec or 600)
+        res = await backend.exec(str(verifier['command']), timeout=timeout, cwd='/')
+        if res.reason in ('transport_error', 'backend_error'):
+            return self.infra_failure(f'verifier command transport error: {res.output[:200]}')
+
+        # 4) 读 reward.json（masking contract：失败时无 reward 键 -> reward_error）
+        reward_file = verifier.get('reward_file') or '/logs/verifier/reward.json'
+        try:
+            payload_text = await backend.read_file(reward_file)
+        except Exception as e:
+            return self.infra_failure(f'reward.json unreadable: {e!r}')
+        try:
+            payload = json.loads(payload_text)
+        except json.JSONDecodeError:
+            return self.infra_failure('reward.json invalid JSON')
+        if 'reward' not in payload:
+            return self.infra_failure(
+                f"official verifier masked (reward_error={payload.get('reward_error')!r}); "
+                f'tail: {res.output[-300:]}')
+        score = float(payload.get('reward', 0.0) or 0.0)
+        # reward_detail.json 供观测
+        detail_file = verifier.get('reward_detail_file') or '/logs/verifier/reward_detail.json'
+        try:
+            detail_text = await backend.read_file(detail_file)
+            detail = json.loads(detail_text)
+        except Exception:
+            detail = {}
+        passed_cnt = detail.get('passed')
+        total_cnt = detail.get('total')
+        msg = (f'official verify score={score:.3f}'
+               + (f' ({passed_cnt}/{total_cnt} rubrics)' if total_cnt else '')
+               + f'\n{res.output[-800:]}')
+        return VerificationResult(
+            score=score,
+            passed=score >= 0.5,
+            components={'official': score},
+            is_infra=False,
+            message=msg,
+        )
+
+    # ------------------------------------------------------------------
+    # 兜底路径：LLM rubric judge（无官方脚本时）
+    # ------------------------------------------------------------------
     async def _collect_answer(self, backend: SandboxBackend, items: List[Dict[str, Any]]) -> str:
         """取 doer 最终产物：优先 spec.extra 里的 submit answer；其次读 rubric 指定/默认文件。"""
         spec = self.spec
@@ -83,10 +187,24 @@ class GeneralVerifier(Verifier):
     async def verify(self, backend: SandboxBackend) -> VerificationResult:
         spec = self.spec
         items = _items(spec.rubrics)
-        if not items:
-            return self.infra_failure('general: rubrics 为空或未解析（verifier_meta.items 缺失）')
 
-        # 判官配置
+        answer = await self._collect_answer(backend, items)
+        if not answer.strip():
+            # doer 没产出可读答案 -> 环境侧问题（文件读不到），按 infra
+            return self.infra_failure('answer_not_found: 读不到 doer 最终答案（answer/submit/answer.md）')
+
+        # ---- 主路径：官方容器内 verify ----
+        official = await self._official_verify(backend, answer)
+        if official is not None and not official.is_infra:
+            return official
+        # 官方脚本存在但 infra 失败：直接返回（不当模型 0 分）
+        if official is not None and official.is_infra:
+            return official
+
+        # ---- 兜底：LLM rubric judge ----
+        if not items:
+            return self.infra_failure('general: rubrics 为空且无官方 verify 脚本（verifier_meta.items 缺失）')
+
         cfg = resolve_judge_config(spec)
         if not judge_configured(cfg):
             return self.infra_failure(
@@ -94,11 +212,6 @@ class GeneralVerifier(Verifier):
                 '（或 JUDGE_*/OPENAI_* 环境变量），无法做 LLM rubric 判定'
             )
         base_url, api_key, model = cfg
-
-        answer = await self._collect_answer(backend, items)
-        if not answer.strip():
-            # doer 没产出可读答案 -> 环境侧问题（文件读不到），按 infra
-            return self.infra_failure('answer_not_found: 读不到 doer 最终答案（answer/submit/answer.md）')
 
         context_base = (f'[Problem]\n{spec.problem_statement}\n\n[Doer Answer]\n{answer}')
 
@@ -153,7 +266,7 @@ class GeneralVerifier(Verifier):
             passed=score >= 0.5,
             components=components,
             is_infra=False,
-            message=(f'general rubric: B={B:.3f}'
+            message=(f'general rubric (fallback judge): B={B:.3f}'
                      + (f' S={S:.3f} (合成 w={_SYNTH_W})' if S is not None else '')
                      + f' over {len(llm_items)} items'),
         )

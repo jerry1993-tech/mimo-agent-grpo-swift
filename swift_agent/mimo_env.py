@@ -57,7 +57,18 @@ class MiMoAgentEnv(Env):
         self.backend = get_backend(self.spec)
         await self.backend.start()
 
-        # general 域：尝试装配 MCP 工具分发器（无配置则 None）
+        # general 域：装配 env_task_dir（manifest uploads + MCP 服务 + rubrics）
+        if self.spec.domain == 'general':
+            try:
+                from sandbox.general_env_setup import setup_general_env, GeneralEnvError
+                setup_info = await setup_general_env(self.spec, self.backend)
+                if isinstance(setup_info.get('rubrics'), (dict, list)):
+                    self.spec.rubrics = setup_info['rubrics']
+            except GeneralEnvError as e:
+                await self._safe_close()
+                raise RuntimeError(f'general env setup failed: {e}') from e
+
+        # general 域：尝试装配 MCP 工具分发器（setup_general_env 已写入 spec.extra['mcp_servers']）
         try:
             from sandbox.mcp_client import mcp_dispatcher_factory
             self.tool_dispatcher = await mcp_dispatcher_factory(self.spec)

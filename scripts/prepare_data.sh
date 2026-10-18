@@ -8,10 +8,20 @@ cd "$(dirname "$0")/.."
 DOMAINS="${*:-code webdev general cyber music}"
 BACKEND="${SANDBOX_BACKEND:-docker}"
 
-echo "[1/2] 下载 parquet（domains=$DOMAINS）..."
+echo "[1/3] 下载 parquet（domains=$DOMAINS）..."
 python3 -m data.download_dataset --domains $DOMAINS
 
-echo "[2/2] 生成 GRPO jsonl（backend=$BACKEND）..."
+echo "[2/3] 下载镜像映射表（image-mapping.jsonl，dataset_image -> dockerhub tag）..."
+python3 -m data.image_mapping
+
+if [[ " $DOMAINS " == *" general "* ]]; then
+  echo "[2.5/3] general 域任务环境目录（可选，数量/体积大；取样训练可跳过全量）："
+  echo "  全量：   python -m data.download_general_envs"
+  echo "  按任务： python -m data.download_general_envs --from-jsonl data/outputs/grpo_general.jsonl"
+  echo "  （未下载的 env_task_dir 行会被 prepare_grpo 跳过并计数）"
+fi
+
+echo "[3/3] 生成 GRPO jsonl（backend=$BACKEND）..."
 python3 -m data.prepare_grpo \
   --domains $DOMAINS \
   --backend "$BACKEND" \
@@ -21,4 +31,4 @@ python3 -m data.prepare_grpo \
   --output-path data/outputs/grpo_train.jsonl
 
 echo "完成。产物见 data/outputs/（grpo_<domain>.jsonl）。"
-echo "SFT 数据需先采集成功轨迹：见 scripts/collect_il.sh 或 data/collect_il_demo.py。"
+echo "SFT 数据需先采集成功轨迹：见 data/collect_il_demo.py。"

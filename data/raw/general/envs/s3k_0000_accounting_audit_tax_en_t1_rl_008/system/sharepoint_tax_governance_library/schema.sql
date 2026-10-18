@@ -1,0 +1,60 @@
+CREATE TABLE controlled_tax_documents (
+  document_id TEXT PRIMARY KEY,
+  document_name TEXT NOT NULL,
+  document_type TEXT NOT NULL CHECK (document_type IN ('memorandum','presentation','workbook','assumption_schedule','irs_publication','california_ftb_guidance','transfer_tax_form','public_company_reference')),
+  version TEXT NOT NULL,
+  effective_date TEXT NOT NULL,
+  prepared_by_id TEXT NOT NULL,
+  reviewed_by_id TEXT,
+  approval_status TEXT NOT NULL CHECK (approval_status IN ('draft','in_review','approved','retired')),
+  approved_at TEXT,
+  case_id TEXT,
+  taxpayer_entity_id TEXT,
+  taxpayer_headquarters_id TEXT,
+  source_authority TEXT,
+  file_uri TEXT UNIQUE,
+  created_at TEXT NOT NULL,
+  CHECK (approval_status <> 'approved' OR approved_at IS NOT NULL),
+  CHECK (document_type <> 'assumption_schedule' OR source_authority IS NOT NULL)
+);
+
+CREATE TABLE decision_records (
+  decision_id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  case_id TEXT NOT NULL,
+  decision_code TEXT NOT NULL CHECK (decision_code IN ('INSTALLMENT_ASSET_SALE','ALL_CASH_DIRECT_SALE_FALLBACK','EQUITY_TRANSFER','STRUCTURING_RECOMMENDATION')),
+  recommendation_text TEXT NOT NULL,
+  fallback_text TEXT,
+  reviewer_id TEXT NOT NULL,
+  reviewer_entity_id TEXT,
+  status TEXT NOT NULL CHECK (status IN ('draft','pending_approval','approved','retired')),
+  approved_at TEXT,
+  draft_score INTEGER,
+  current_score INTEGER,
+  decision_version TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (document_id) REFERENCES controlled_tax_documents(document_id),
+  CHECK (status <> 'approved' OR approved_at IS NOT NULL)
+);
+
+CREATE TABLE document_evidence_register (
+  evidence_id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  case_id TEXT NOT NULL,
+  anchor_name TEXT NOT NULL,
+  source_type TEXT NOT NULL CHECK (source_type IN ('workbook_cell','source_document','assumption','transaction_record','execution_requirement')),
+  source_reference TEXT NOT NULL,
+  evidence_text TEXT NOT NULL,
+  review_status TEXT NOT NULL CHECK (review_status IN ('current','approved','superseded','rejected')),
+  reviewer_id TEXT NOT NULL,
+  reviewer_entity_id TEXT,
+  effective_date TEXT NOT NULL,
+  requirement_type TEXT,
+  observed_value_text TEXT,
+  observed_amount_cents INTEGER,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (document_id) REFERENCES controlled_tax_documents(document_id),
+  CHECK (source_type <> 'execution_requirement' OR requirement_type IS NOT NULL),
+  CHECK (source_type <> 'transaction_record' OR observed_amount_cents IS NOT NULL OR observed_value_text IS NOT NULL),
+  CHECK (observed_amount_cents IS NULL OR observed_amount_cents >= 0)
+);

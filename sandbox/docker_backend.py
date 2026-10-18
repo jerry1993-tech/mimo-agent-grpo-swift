@@ -51,15 +51,54 @@ class DockerBackend(SandboxBackend):
     def __init__(self, spec: TaskSpec, **opts):
         super().__init__(spec, **opts)
         self.container_name: Optional[str] = None
-        # 资源限制：opts 优先，其次环境变量，最后给安全默认值
-        self.memory = opts.get('memory') or _os.environ.get('SANDBOX_DOCKER_MEMORY', '2g')
-        self.cpus = str(opts.get('cpus') or _os.environ.get('SANDBOX_DOCKER_CPUS', '2.0'))
+        # 资源限制：任务级 spec.cpus/memory_mb 优先，其次 opts，再次环境变量，最后安全默认值
+        self.memory = (
+            opts.get('memory')
+            or (f'{int(spec.memory_mb)}m' if spec.memory_mb else None)
+            or _os.environ.get('SANDBOX_DOCKER_MEMORY', '2g')
+        )
+        self.cpus = str(
+            opts.get('cpus')
+            or spec.cpus
+            or _os.environ.get('SANDBOX_DOCKER_CPUS', '2.0')
+        )
         self.pids_limit = str(opts.get('pids_limit') or _os.environ.get('SANDBOX_DOCKER_PIDS_LIMIT', '256'))
         self._default_timeout = float(spec.tool_timeout_sec or 30.0)
         # 容器自毁 TTL：env SANDBOX_TTL_SEC（缺省 7200）+ verifier_timeout_sec 余量，opts 可覆盖。
         # 即便 stop() 永不被调用（驱动器 max_turns 强杀、未走 close），容器也会在 TTL 后
         # 自动退出；配合 --rm 即自动删除，杜绝容器泄漏。
         self.ttl_sec = self._compute_ttl(opts)
+
+    def _resolve_image(self) -> str:
+        """镜像解析优先序：dockerhub_image（image-mapping.jsonl 解析的全名）
+        > docker_image（parquet 原始名，用户可能已 retag）。
+        两者都非 xiaomimimo/ 前缀且本地不存在时，_ensure_image 会尝试按
+        xiaomimimo/mimo-v2.6-rl-oss:<tag> 猜测并 pull（覆盖用户手工 retag 场景）。
+        """
+        img = (getattr(self.spec, 'dockerhub_image', '') or '').strip()
+        if img:
+            return img
+        return (self.spec.docker_image or '').strip()
+
+    async def _ensure_image(self, image: str) -> None:
+        """镜像本地不存在时自动 docker pull（仅对 xiaomimimo/ 官方仓可靠；
+        其它名字 pull 失败不吞，由 start() 报错）。"""
+        out, err, rc = await self._run(
+            ['docker', 'image', 'inspect', image], wall_timeout=30.0)
+        if rc == 0:
+            return
+        pull_argv = ['docker', 'pull', image]
+        out, err, rc = await self._run(pull_argv, wall_timeout=self._pull_timeout)
+        if rc != 0:
+            raise RuntimeError(
+                f'docker pull failed for {image} (rc={rc}): {err.strip()[:500]}. '
+                f'若为任务镜像，请确认 data/raw/image-mapping.jsonl 已生成 env_config.dockerhub_image，'
+                f'或手工 docker pull xiaomimimo/mimo-v2.6-rl-oss:<tag> 后 docker tag。'
+            )
+
+    @property
+    def _pull_timeout(self) -> float:
+        return float(_os.environ.get('SANDBOX_DOCKER_PULL_TIMEOUT', '1800'))
 
     def _compute_ttl(self, opts) -> int:
         # opts.ttl_sec 为显式覆盖：视为最终 TTL（不再叠加余量，仅保底 60s）
@@ -113,8 +152,11 @@ class DockerBackend(SandboxBackend):
             raise RuntimeError(
                 f'docker daemon unavailable (rc={rc}): {err.strip() or "is docker installed/running?"}'
             )
-        if not self.spec.docker_image:
+        if not self.spec.docker_image and not getattr(self.spec, 'dockerhub_image', ''):
             raise RuntimeError('TaskSpec.docker_image is empty; cannot start container.')
+
+        image = self._resolve_image()
+        await self._ensure_image(image)
 
         name = f"mimo-{_sanitize_container_name(self.spec.instance_id)}-{uuid.uuid4().hex[:8]}"
         argv: List[str] = [
@@ -137,7 +179,7 @@ class DockerBackend(SandboxBackend):
         ttl_cmd = (
             f"trap 'exit 0' TERM INT; ( sleep {self.ttl_sec}; kill -TERM $$ ) & wait"
         )
-        argv += [self.spec.docker_image, 'bash', '-lc', ttl_cmd]
+        argv += [image, 'bash', '-lc', ttl_cmd]
 
         out, err, rc = await self._run(argv, wall_timeout=300.0)
         if rc != 0:
@@ -228,6 +270,48 @@ class DockerBackend(SandboxBackend):
                         break
                     return f.read().decode('utf-8', errors='replace')
         raise FileNotFoundError(f'{path}: not found in tar stream')
+
+    async def upload_dir(self, local_dir: str, remote_dir: str) -> int:
+        """把本地目录整树 tar 进容器 remote_dir（general 域 env_task_dir 上传）。
+
+        返回写入的文件数；空目录/异常抛错。逐文件上传的上限问题：
+        上游实测 exec 流 >33MB 会断（kubernetes.py），docker exec tar 整目录
+        同样受限，故大目录建议分批（这里先整体 tar，失败由调用方降级）。
+        """
+        if not self.container_name:
+            raise RuntimeError('container not started')
+        local_dir = _os.path.abspath(local_dir)
+        if not _os.path.isdir(local_dir):
+            raise FileNotFoundError(f'local dir not found: {local_dir}')
+        n = 0
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w') as tf:
+            for root, _dirs, files in _os.walk(local_dir):
+                for fname in files:
+                    fpath = _os.path.join(root, fname)
+                    arcname = _os.path.relpath(fpath, local_dir)
+                    tf.add(fpath, arcname=arcname)
+                    n += 1
+        if n == 0:
+            return 0
+        return await self.upload_tarball(buf.getvalue(), remote_dir)
+
+    async def upload_tarball(self, tar_bytes: bytes, remote_dir: str) -> int:
+        """tar 字节流直接经 docker exec tar xmf - 解包进容器（不在宿主机落盘）。"""
+        if not self.container_name:
+            raise RuntimeError('container not started')
+        out, err, rc = await self._run(
+            ['docker', 'exec', self.container_name, 'mkdir', '-p', remote_dir],
+            wall_timeout=30.0,
+        )
+        if rc != 0:
+            raise IOError(f'mkdir {remote_dir} failed: {err.strip()[:300]}')
+        argv = ['docker', 'exec', '-i', self.container_name, 'tar', 'xmf', '-', '-C', remote_dir]
+        out, err, rc = await self._run(argv, input_bytes=tar_bytes, wall_timeout=300.0)
+        if rc != 0:
+            raise IOError(f'docker tar extract failed (rc={rc}): {err.strip()[:300]}')
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode='r:') as tf:
+            return sum(1 for m in tf.getmembers() if m.isfile())
 
     # ------------------------------------------------------------------
     # 打分前还原受测文件

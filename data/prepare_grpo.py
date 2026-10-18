@@ -27,6 +27,9 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from swift_agent.spec import TaskSpec  # noqa: E402  (框架无关)
+from data.image_mapping import (  # noqa: E402
+    ensure_image_mapping, load_image_mapping, resolve_dockerhub_image,
+)
 
 REPO_ID = "XiaomiMiMo/MiMo-V2.6-RL-oss"
 
@@ -87,8 +90,14 @@ def build_runtime_overrides(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def process_domain(domain: str, raw_dir: str, overrides: Dict[str, Any],
-                   limit: Optional[int], seed: int) -> (List[Dict[str, Any]], int, int):
-    """读取单域 parquet，返回 (records, kept, bad)。"""
+                   limit: Optional[int], seed: int,
+                   image_mapping: Optional[Dict[str, str]] = None) -> (List[Dict[str, Any]], int, int):
+    """读取单域 parquet，返回 (records, kept, bad)。
+
+    image_mapping：dataset_image -> dockerhub_image（data/image_mapping.py）。
+    general 域还需要本地 env_task_dir 存在（data/raw/general/envs/<dir>），
+    否则该行跳过并计数（env_task_missing），避免训练时整域 infra 失败。
+    """
     import pyarrow.parquet as pq
 
     path = resolve_parquet(domain, raw_dir)
@@ -104,12 +113,24 @@ def process_domain(domain: str, raw_dir: str, overrides: Dict[str, Any],
 
     records: List[Dict[str, Any]] = []
     bad = 0
+    missing_env_dir = 0
     for i in order:
         row = df.iloc[i].to_dict()
         try:
             spec: TaskSpec = TaskSpec.from_parquet_row(row)
             if not spec.problem_statement:
                 raise ValueError('empty problem_statement')
+            # 镜像名映射：dataset_image -> xiaomimimo/mimo-v2.6-rl-oss:<tag>
+            if image_mapping:
+                hub = resolve_dockerhub_image(spec.docker_image, image_mapping)
+                if hub:
+                    spec.dockerhub_image = hub
+            # general 域：env_task_dir 必须本地存在（sandbox 需要上传 rubric/工具/工作区文件）
+            if spec.domain == 'general' and spec.env_task_dir:
+                env_root = os.path.join(raw_dir, 'general', 'envs')
+                if not os.path.isdir(os.path.join(env_root, os.path.normpath(spec.env_task_dir))):
+                    missing_env_dir += 1
+                    continue
             rec = {
                 'messages': [{'role': 'user', 'content': spec.problem_statement}],
                 'env_config': spec.to_env_config(overrides),
@@ -118,6 +139,9 @@ def process_domain(domain: str, raw_dir: str, overrides: Dict[str, Any],
         except Exception as e:  # 坏行：跳过并记录原因
             bad += 1
             print(f'  [bad row] domain={domain} row_index={i} reason={type(e).__name__}: {e}')
+    if missing_env_dir:
+        print(f'  [skip] domain={domain}: {missing_env_dir} rows skipped '
+              f'(env_task_dir not downloaded; run: python -m data.download_general_envs)')
     return records, len(records), bad
 
 
@@ -148,6 +172,16 @@ def main() -> None:
     out_dir = os.path.dirname(args.output_path) or '.'
     os.makedirs(out_dir, exist_ok=True)
 
+    # 镜像映射表：docker_image(本地别名) -> dockerhub_image(官方仓 tag)
+    try:
+        ensure_image_mapping(args.raw_dir)
+        image_mapping = load_image_mapping(args.raw_dir)
+        print(f'[image-mapping] loaded {len(image_mapping)} entries from {args.raw_dir}')
+    except Exception as e:
+        image_mapping = {}
+        print(f'[image-mapping] WARN: 无法加载映射表（{type(e).__name__}: {e}）；'
+              f'env_config.dockerhub_image 将为空，DockerBackend 需本地已有任务镜像。')
+
     # 合并文件句柄
     total_kept = 0
     total_bad = 0
@@ -155,7 +189,8 @@ def main() -> None:
     with open(args.output_path, 'w', encoding='utf-8') as f_all:
         for domain in args.domains:
             records, kept, bad = process_domain(
-                domain, args.raw_dir, overrides, args.limit, args.seed)
+                domain, args.raw_dir, overrides, args.limit, args.seed,
+                image_mapping=image_mapping)
             total_kept += kept
             total_bad += bad
             stats[domain] = kept

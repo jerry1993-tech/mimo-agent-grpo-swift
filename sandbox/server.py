@@ -1,18 +1,30 @@
 """外接沙箱 HTTP 服务（FastAPI）——管理多个 per-task session。
 
-每个 session 在服务端持有一个 SandboxBackend（默认 DockerBackend，一任务一容器）；
-环境变量 ``SANDBOX_BACKEND=local`` 可切到 LocalBackend 便于本机演示（无隔离）。
+典型部署：GPU 训练实例（ms-swift GRPO）经 RemoteBackend 连本服务；
+本服务在 CPU/容器宿主机上运行，每个 session 持有一个 SandboxBackend
+（默认 DockerBackend，一任务一容器）。环境变量 ``SANDBOX_BACKEND=local``
+可切到 LocalBackend 便于本机演示（无隔离，勿用于生产）。
 
 端点（OpenAPI 一致，pydantic 模型）：
 - POST   /sessions                  body=env_config(dict) -> {session_id}
 - POST   /sessions/{id}/exec         body={command,timeout?,cwd?} -> ExecResult dict
 - POST   /sessions/{id}/files        body={path,content}
 - GET    /sessions/{id}/files?path=  -> {content}
+- POST   /sessions/{id}/upload_dir   multipart(tarball, remote_dir) -> {files:n}
 - DELETE /sessions/{id}
-- GET    /healthz
+- GET    /healthz                    （免鉴权，供探活）
 
-启动：``python3 -m sandbox.server``（host/port 取 SANDBOX_HOST / SANDBOX_PORT）。
-依赖：fastapi, uvicorn, httpx, pydantic。
+环境变量：
+- SANDBOX_HOST / SANDBOX_PORT        监听地址（默认 0.0.0.0:8000）
+- SANDBOX_BACKEND                    docker | local（默认 docker）
+- SANDBOX_TOKEN                      共享密钥；设置后所有业务端点要求
+                                      请求头 X-Sandbox-Token 匹配（强烈建议
+                                      公网部署时设置，并配合安全组白名单）
+- SANDBOX_MAX_CONCURRENT_SESSIONS    并发 session 上限（0=不限）。超出时
+                                      create 排队等待（适配小规格宿主机）。
+
+启动：``python3 -m sandbox.server``。
+依赖：fastapi, uvicorn, httpx, pydantic, python-multipart。
 """
 from __future__ import annotations
 
@@ -23,12 +35,13 @@ _ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
 if _ROOT not in _sys.path:
     _sys.path.insert(0, _ROOT)
 
+import asyncio
 import uuid
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from sandbox.base import SandboxBackend, get_backend
 from swift_agent.spec import TaskSpec
@@ -55,16 +68,33 @@ class ReadFileResponse(BaseModel):
     content: str
 
 
+class UploadDirResponse(BaseModel):
+    files: int
+
+
 class HealthResponse(BaseModel):
     status: str = 'ok'
     sessions: int = 0
+    max_sessions: int = 0
 
 
 # ----------------------------------------------------------------------
-# App + session 表
+# App + session 表 + 并发闸门
 # ----------------------------------------------------------------------
-app = FastAPI(title='MiMo Sandbox Server', version='1.0')
+app = FastAPI(title='MiMo Sandbox Server', version='1.1')
 SESSIONS: Dict[str, SandboxBackend] = {}
+
+_MAX_SESSIONS = int(_os.environ.get('SANDBOX_MAX_CONCURRENT_SESSIONS', '0') or 0)
+_SEMAPHORE: Optional[asyncio.Semaphore] = (
+    asyncio.Semaphore(_MAX_SESSIONS) if _MAX_SESSIONS > 0 else None
+)
+
+
+def require_token(x_sandbox_token: str = Header(default='')) -> None:
+    """共享密钥鉴权：SANDBOX_TOKEN 设置后，请求头必须带相同值。"""
+    expected = _os.environ.get('SANDBOX_TOKEN', '')
+    if expected and x_sandbox_token != expected:
+        raise HTTPException(status_code=401, detail='invalid or missing X-Sandbox-Token')
 
 
 def _backend_override(spec: TaskSpec) -> TaskSpec:
@@ -94,15 +124,22 @@ async def _shutdown() -> None:
                 await be.stop()
             except Exception:
                 pass
+        if _SEMAPHORE is not None:
+            _SEMAPHORE.release()
 
 
 @app.get('/healthz', response_model=HealthResponse)
 async def healthz() -> HealthResponse:
-    return HealthResponse(status='ok', sessions=len(SESSIONS))
+    return HealthResponse(status='ok', sessions=len(SESSIONS), max_sessions=_MAX_SESSIONS)
 
 
-@app.post('/sessions', response_model=CreateSessionResponse)
+@app.post('/sessions', response_model=CreateSessionResponse,
+          dependencies=[Depends(require_token)])
 async def create_session(env_config: Dict[str, Any]) -> CreateSessionResponse:
+    # 并发闸门：达到上限时在此排队（不拒绝），直到有 session 结束。
+    # 注意：等待期间客户端 HTTP 超时须足够长（RemoteBackend 建会话已放宽到 900s）。
+    if _SEMAPHORE is not None:
+        await _SEMAPHORE.acquire()
     try:
         spec = TaskSpec.from_env_config(env_config)
         spec = _backend_override(spec)
@@ -110,8 +147,12 @@ async def create_session(env_config: Dict[str, Any]) -> CreateSessionResponse:
         await backend.start()
     except FileNotFoundError as e:
         # 例如本机无 docker -> 503 基建错误
+        if _SEMAPHORE is not None:
+            _SEMAPHORE.release()
         raise HTTPException(status_code=503, detail=f'sandbox backend unavailable: {e}')
     except Exception as e:
+        if _SEMAPHORE is not None:
+            _SEMAPHORE.release()
         raise HTTPException(status_code=500, detail=f'failed to start session: {e}')
     sid = uuid.uuid4().hex
     SESSIONS[sid] = backend
@@ -125,7 +166,7 @@ def _get(sid: str) -> SandboxBackend:
     return be
 
 
-@app.post('/sessions/{sid}/exec')
+@app.post('/sessions/{sid}/exec', dependencies=[Depends(require_token)])
 async def exec_command(sid: str, req: ExecRequest) -> JSONResponse:
     be = _get(sid)
     try:
@@ -135,7 +176,8 @@ async def exec_command(sid: str, req: ExecRequest) -> JSONResponse:
     return JSONResponse(res.to_dict())
 
 
-@app.post('/sessions/{sid}/files', status_code=204)
+@app.post('/sessions/{sid}/files', status_code=204,
+          dependencies=[Depends(require_token)])
 async def write_file(sid: str, req: WriteFileRequest) -> JSONResponse:
     be = _get(sid)
     try:
@@ -145,7 +187,8 @@ async def write_file(sid: str, req: WriteFileRequest) -> JSONResponse:
     return JSONResponse({'ok': True})
 
 
-@app.get('/sessions/{sid}/files', response_model=ReadFileResponse)
+@app.get('/sessions/{sid}/files', response_model=ReadFileResponse,
+         dependencies=[Depends(require_token)])
 async def read_file(sid: str, path: str) -> ReadFileResponse:
     be = _get(sid)
     try:
@@ -157,7 +200,22 @@ async def read_file(sid: str, path: str) -> ReadFileResponse:
     return ReadFileResponse(content=content)
 
 
-@app.delete('/sessions/{sid}', status_code=204)
+@app.post('/sessions/{sid}/upload_dir', response_model=UploadDirResponse,
+          dependencies=[Depends(require_token)])
+async def upload_dir(sid: str, remote_dir: str = Form(...),
+                     tarball: UploadFile = File(...)) -> UploadDirResponse:
+    """接收 tar 归档（multipart），服务端解包进该 session 的容器 remote_dir。"""
+    be = _get(sid)
+    try:
+        tar_bytes = await tarball.read()
+        n = await be.upload_tarball(tar_bytes, remote_dir)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f'upload_dir failed: {e}')
+    return UploadDirResponse(files=n)
+
+
+@app.delete('/sessions/{sid}', status_code=204,
+            dependencies=[Depends(require_token)])
 async def delete_session(sid: str) -> JSONResponse:
     be = SESSIONS.pop(sid, None)
     if be is not None:
@@ -165,6 +223,8 @@ async def delete_session(sid: str) -> JSONResponse:
             await be.stop()
         except Exception:
             pass  # 幂等吞异常
+    if _SEMAPHORE is not None:
+        _SEMAPHORE.release()
     return JSONResponse({'deleted': True})
 
 

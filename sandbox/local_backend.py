@@ -48,11 +48,20 @@ class LocalBackend(SandboxBackend):
 
     # ------------------------------------------------------------------
     def _safe_abspath(self, path: str) -> str:
-        """把用户给的路径限制在 self.root 内，防路径穿越；越界抛 ValueError。"""
+        """把用户给的路径限制在 self.root 内，防路径穿越；越界抛 ValueError。
+
+        绝对路径（容器语义，如 /work/workspace）在 local 后端映射为
+        root 下的同名相对路径（/work/workspace -> root/work/workspace），
+        与 write_file 的 tar-root 语义一致；root 自身除外。
+        """
         if self.root is None:
             raise RuntimeError('local backend not started')
         if os.path.isabs(path):
-            cand = os.path.normpath(path)
+            stripped = path.replace('\\', '/').lstrip('/')
+            if not stripped:  # '/' -> root 自身
+                cand = self.root
+            else:
+                cand = os.path.normpath(os.path.join(self.root, stripped))
         else:
             cand = os.path.normpath(os.path.join(self.root, path))
         real_root = os.path.realpath(self.root)
@@ -91,6 +100,22 @@ class LocalBackend(SandboxBackend):
         self._started = False
 
     # ------------------------------------------------------------------
+    # local 后端模拟容器文件系统时，exec 命令里的容器绝对路径前缀改写到临时 root。
+    # 只重写已知的官方挂载点（manifest.json 的 target 均在这些前缀下），避免误伤。
+    _CONTAINER_PREFIXES = ('/work/', '/installed-agent/', '/logs/', '/tmp/agent_output/')
+
+    def _rewrite_container_paths(self, command: str) -> str:
+        """把命令中出现的容器绝对路径前缀替换为 root 下的实际位置。"""
+        if not self.root:
+            return command
+        out = command
+        for p in self._CONTAINER_PREFIXES:
+            # ' /work/x' -> ' <root>/work/x'（词首匹配，避免匹配子串）
+            out = out.replace(f' {p}', f' {self.root}/{p}')
+            out = out.replace(f'={p}', f'={self.root}/{p}')
+            out = out.replace(f'({p}', f'({self.root}/{p}')
+        return out
+
     async def exec(self, command: str, timeout: Optional[float] = None,
                    cwd: Optional[str] = None) -> ExecResult:
         if not self._started or not self.root:
@@ -100,6 +125,7 @@ class LocalBackend(SandboxBackend):
         if cwd:
             eff_cwd = self._safe_abspath(cwd)
             os.makedirs(eff_cwd, exist_ok=True)
+        command = self._rewrite_container_paths(command)
         t = float(timeout) if timeout is not None else self._default_timeout
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -144,6 +170,45 @@ class LocalBackend(SandboxBackend):
             raise FileNotFoundError(path)
         with open(abspath, 'r', encoding='utf-8', errors='replace') as f:
             return f.read()
+
+    async def upload_dir(self, local_dir: str, remote_dir: str) -> int:
+        """把本地目录整树拷进临时 root 下的 remote_dir（仅测试用）。"""
+        target = self._safe_abspath(remote_dir)
+        os.makedirs(target, exist_ok=True)
+        n = 0
+        for root, _dirs, files in os.walk(local_dir):
+            rel = os.path.relpath(root, local_dir)
+            dst_dir = target if rel == '.' else os.path.join(target, rel)
+            os.makedirs(dst_dir, exist_ok=True)
+            for fname in files:
+                shutil.copy2(os.path.join(root, fname), os.path.join(dst_dir, fname))
+                n += 1
+        return n
+
+    async def upload_tarball(self, tar_bytes: bytes, remote_dir: str) -> int:
+        """tar 字节流解包到临时 root 下的 remote_dir（远程上传的服务端落地）。"""
+        import io
+        import tarfile
+        target = self._safe_abspath(remote_dir)
+        os.makedirs(target, exist_ok=True)
+        n = 0
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode='r:') as tf:
+            for m in tf.getmembers():
+                if not (m.isfile() or m.isdir()):
+                    continue
+                # 归一化成员路径，防 tar 内 ../ 逃逸（tarfile extract 手工逐成员）
+                dest = os.path.normpath(os.path.join(target, m.name))
+                real_target = os.path.realpath(target)
+                if not (dest == real_target or dest.startswith(real_target + os.sep)):
+                    raise ValueError(f'tar member escapes sandbox root: {m.name!r}')
+                if m.isdir():
+                    os.makedirs(dest, exist_ok=True)
+                else:
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    with open(dest, 'wb') as f:
+                        f.write(tf.extractfile(m).read())
+                    n += 1
+        return n
 
     # ------------------------------------------------------------------
     async def reset_files(self, relpaths: List[str]) -> bool:

@@ -84,8 +84,24 @@ class SandboxBackend(ABC):
 
     @abstractmethod
     async def read_file(self, path: str) -> str:
-        """读取环境内文本文件；不存在时抛出 FileNotFoundError。"""
+        """读取环境内文本文件；不存在时抛 FileNotFoundError。"""
         raise NotImplementedError
+
+    async def upload_dir(self, local_dir: str, remote_dir: str) -> int:
+        """把本地目录整树上传到环境内 remote_dir（general 域 env_task_dir 用）。
+
+        默认抛 NotImplementedError；Docker/Local/Remote 后端实现。返回写入文件数。
+        """
+        raise NotImplementedError(
+            f'backend {self.name!r} does not support upload_dir')
+
+    async def upload_tarball(self, tar_bytes: bytes, remote_dir: str) -> int:
+        """把一个 tar 归档字节流解包到环境内 remote_dir（远程上传的服务端落地）。
+
+        返回归档内文件数。默认抛 NotImplementedError；Docker/Local 实现。
+        """
+        raise NotImplementedError(
+            f'backend {self.name!r} does not support upload_tarball')
 
     async def reset_files(self, relpaths: List[str]) -> bool:
         """打分前把指定文件还原到基线（code 域：git reset 受 test_patch 影响的文件）。

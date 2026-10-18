@@ -1,0 +1,71 @@
+{
+ "items": [
+  {
+   "id": "current_recommended_structure",
+   "tier": "critical",
+   "method": "llm",
+   "weight": 0.2,
+   "files": [
+    "answer.md"
+   ],
+   "question": "Does the final answer identify the current recommended installment transaction and correctly exclude superseded alternatives from the current closing-status conclusion?",
+   "pass_anchor": "Ground truth from the DealCloud Disposition Workspace and approved SharePoint records: the current recommended record is the installment-sale transaction for CASE-FAIRFAX3-2025Q3 (transaction DC-TXN-25Q3-024, status recommended). The direct-sale records for that case and the partnership-interest/equity-transfer record are not the current recommended structure; the earlier direct-sale bid is superseded, the active direct-sale row is only the all-cash fallback/comparison, and the equity-transfer row is superseded. The answer must not use the completed buyer-solvency row attached to the superseded equity-transfer transaction as proof that the recommended installment package is ready."
+  },
+  {
+   "id": "documentary_tax_components",
+   "tier": "critical",
+   "method": "llm",
+   "weight": 0.2,
+   "files": [
+    "answer.md"
+   ],
+   "question": "Does the final answer report the approved County and City of Los Angeles documentary-transfer-tax components and the approved summary for the recommended installment transaction?",
+   "pass_anchor": "Ground truth from active DealCloud closing requirements for the recommended installment transaction: Los Angeles County documentary-transfer-tax component = $9,141.00; City of Los Angeles component = $37,395.00; approved documentary-transfer-tax summary = $46,536.00. The component rows are authoritative and add to the summary. The answer must use these installment values, not the $13,200.00 county, $54,000.00 city, or $67,200.00 summary belonging to the active direct-sale comparison, and not the inactive legacy county amount."
+  },
+  {
+   "id": "protection_statuses",
+   "tier": "critical",
+   "method": "llm",
+   "weight": 0.25,
+   "files": [
+    "answer.md"
+   ],
+   "question": "Does the final answer correctly separate every material protection for the recommended installment structure into approved/complete versus unresolved, including the absence of an active buyer-solvency row for that transaction?",
+   "pass_anchor": "Ground truth from the approved memorandum, workbook controls, and active DealCloud requirements: payment covenant is approved for $6,000,000.00 over the three-year note term; federal nonforeign affidavit is approved (the requirement is active, but the updated affidavit remains a closing condition); seller-note collateral covering $6,000,000.00 is in review; California withholding clearance is in review; buyer-solvency diligence is required by the approved recommendation but has no active requirement row on the recommended installment transaction. A buyer-solvency requirement marked complete exists only on the superseded equity-transfer transaction and must not be counted for the installment package. The answer should also recognize that the approved/complete tax items do not resolve the open protections."
+  },
+  {
+   "id": "controlled_payment_split_and_fallback",
+   "tier": "critical",
+   "method": "llm",
+   "weight": 0.2,
+   "files": [
+    "answer.md"
+   ],
+   "question": "Does the final answer state the controlled recommendation's payment split and its fallback position?",
+   "pass_anchor": "Ground truth from the approved Fairfax & 3rd Structuring Recommendation and decision record DEC-2025-017: proceed with a negotiated installment asset sale using a $7,183,750.00 closing principal payment and a $21,551,250.00 secured seller note. The approved fallback is an all-cash direct sale if installment protections are not acceptable; the partnership-interest transfer is not prioritized. The answer must tie the open protections to this controlled recommendation rather than treating the DealCloud comparison row's different $8,310,000.00 / $6,000,000.00 figures as the approved split."
+  },
+  {
+   "id": "readiness_conclusion",
+   "tier": "important",
+   "method": "llm",
+   "weight": 0.15,
+   "files": [
+    "answer.md"
+   ],
+   "question": "Does the final answer reach the correct execution-readiness conclusion for the recommended package and explain the gating logic?",
+   "pass_anchor": "Ground truth conclusion: the package is not ready for unconditional authorization to close as documented. The approved documentary-tax amounts, approved payment covenant, and approved/required federal affidavit do not eliminate the unresolved seller-note collateral and California withholding review, and buyer-solvency diligence is still a required condition without an active installment-row completion record. The recommendation is conditional: proceed with negotiation/close preparation only after the stated protections and diligence are resolved; otherwise use the all-cash direct-sale fallback. Do not call the package fully ready merely because some tax requirements are approved or because a superseded transaction shows a completed requirement."
+  },
+  {
+   "id": "source_data_present",
+   "tier": "sanity",
+   "method": "rule",
+   "fn": "check_source_data_present"
+  }
+ ],
+ "check_code": "from pathlib import Path\nimport sqlite3\n\n\ndef check_source_data_present(ws):\n    root = Path(ws).parent / \"system\"\n    dealcloud = root / \"dealcloud_disposition_workspace\" / \"state.db\"\n    sharepoint = root / \"sharepoint_tax_governance_library\" / \"state.db\"\n    if not dealcloud.exists() or not sharepoint.exists():\n        return {\"score\": 0, \"detail\": \"Required DealCloud or SharePoint state database is missing\"}\n    with sqlite3.connect(dealcloud) as connection:\n        transaction = connection.execute(\n            \"SELECT structure_code, transaction_status FROM disposition_transactions \"\n            \"WHERE transaction_id = ? AND case_id = ?\",\n            (\"DC-TXN-25Q3-024\", \"CASE-FAIRFAX3-2025Q3\"),\n        ).fetchone()\n        requirements = connection.execute(\n            \"SELECT COUNT(*) FROM closing_requirements \"\n            \"WHERE transaction_id = ? AND active_flag = 1\",\n            (\"DC-TXN-25Q3-024\",),\n        ).fetchone()[0]\n    with sqlite3.connect(sharepoint) as connection:\n        decision = connection.execute(\n            \"SELECT status, decision_code FROM decision_records \"\n            \"WHERE decision_id = ? AND case_id = ?\",\n            (\"DEC-2025-017\", \"CASE-FAIRFAX3-2025Q3\"),\n        ).fetchone()\n    if transaction != (\"installment_sale\", \"recommended\"):\n        return {\"score\": 0, \"detail\": f\"Recommended transaction anchor is incorrect: {transaction}\"}\n    if requirements != 7:\n        return {\"score\": 0, \"detail\": f\"Expected 7 active recommended requirements, found {requirements}\"}\n    if decision != (\"approved\", \"INSTALLMENT_ASSET_SALE\"):\n        return {\"score\": 0, \"detail\": f\"Approved decision anchor is incorrect: {decision}\"}\n    return {\"score\": 1, \"detail\": \"Recommended installment transaction, seven active requirements, and approved decision are present\"}\n",
+ "gold_answer": null,
+ "input": "both",
+ "act": "none",
+ "output": "none",
+ "reward": "rl_grade"
+}

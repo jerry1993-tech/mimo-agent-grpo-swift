@@ -82,8 +82,17 @@ class TaskSpec:
 
     # 环境
     docker_image: str = ''
+    # dataset_image 的 Docker Hub 全名（xiaomimimo/mimo-v2.6-rl-oss:<tag>）；
+    # 由 data/prepare_grpo.py 按 image-mapping.jsonl 解析后写入 env_config。
+    # DockerBackend 优先用它（本地无该镜像时自动 pull）。
+    dockerhub_image: str = ''
     cwd: str = ''
     network: bool = False
+    # 任务级资源规格（general 域 instance_json 携带；其余域缺省走后端默认值）
+    cpus: Optional[float] = None
+    memory_mb: Optional[int] = None
+    # agent 总时长上限（general 域 instance_json.agent_timeout_sec，秒）
+    agent_timeout_sec: Optional[float] = None
 
     # 任务描述
     problem_statement: str = ''
@@ -182,6 +191,21 @@ class TaskSpec:
         if instance_json.get('num_turns') is not None:
             try:
                 spec.num_turns = int(instance_json['num_turns'])
+            except (TypeError, ValueError):
+                pass
+        if instance_json.get('agent_timeout_sec') is not None:
+            try:
+                spec.agent_timeout_sec = float(instance_json['agent_timeout_sec'])
+            except (TypeError, ValueError):
+                pass
+        if instance_json.get('cpus') is not None:
+            try:
+                spec.cpus = float(instance_json['cpus'])
+            except (TypeError, ValueError):
+                pass
+        if instance_json.get('memory_mb') is not None:
+            try:
+                spec.memory_mb = int(instance_json['memory_mb'])
             except (TypeError, ValueError):
                 pass
         # terminal_bench 资源规格

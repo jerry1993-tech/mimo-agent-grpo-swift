@@ -114,12 +114,14 @@ sequenceDiagram
 | 沙箱形态 | 一任务一 Pod/容器，k8s/docker exec | 一任务一容器（DockerBackend） | ✅ |
 | 命令执行 | `timeout N bash -lc` → `{output,returncode,reason}` | 同（`docker exec ... timeout N bash -lc`） | ✅ |
 | 文件传输 | tar 流 / docker cp | tar 流（docker）/ 直接写（local） | ✅ |
+| 镜像来源 | 每任务镜像名（内部 tag 规范） | image-mapping.jsonl 映射到 `xiaomimimo/mimo-v2.6-rl-oss:<tag>`，缺失自动 pull | ✅ |
+| general 环境文件 | env_task_dir 上传 Pod（main/sidecar 双容器） | manifest.json uploads 单容器近似上传 + MCP 服务 | ✅（单容器近似） |
 | 网络隔离 | 默认断网 + 反作弊域名黑洞 | `--network=none`（`spec.network=true` 才放开） | ✅（基础） |
 | 资源限制 | Pod cpu/mem 配额 | `--memory/--cpus/--pids-limit` | ✅ |
 | 隐藏测试 | 打分时才 `git apply test_patch` | `CodeVerifier.verify()` 内 apply（agent 期间无测试） | ✅ |
 | Code reward | test_command exit 0 → 1.0（二值） | 同 | ✅ |
 | Cyber reward | 崩溃函数+sanitizer+error_type 全等 | `CyberVerifier` 同规则（依赖 arvo 镜像内 server） | ✅（逻辑） |
-| General reward | judge agent 逐条 rubric，B=均值，`w·S+(1−w)B` | `GeneralVerifier` 经 OpenAI 兼容 judge 同式 | ✅（逻辑） |
+| General reward | judge agent 逐条 rubric，B=均值，`w·S+(1−w)B` | 官方 `run_verify.py` 容器内执行优先；LLM judge 同式兜底 | ✅（逻辑；local 后端仅兜底） |
 | Music reward | 18 特征 vs 人类分布（六组权重） | 结构性规则子集（同权重映射，留 `_feature_score` 钩子） | ⚠️ 子集 |
 | WebDev reward | 截图 + 组级 8 轮成对相对排序 | 确定性检查 + `/grade` 钩子；组级排序留接口 | ⚠️ 部分 |
 | 奖励发放位置 | 仅**末位 token 单点** outcome | 中间步 reward=0，最终步一次性 outcome（total_reward） | ✅ |
@@ -137,15 +139,18 @@ mimo-agent-grpo-swift/
 ├── configs/                 # grpo_code / grpo_music / grpo_general / sft 配置（yaml）
 ├── data/
 │   ├── download_dataset.py     # 下载 5 parquet
+│   ├── image_mapping.py        # dataset_image -> dockerhub tag 映射（image-mapping.jsonl）
+│   ├── download_general_envs.py # 下载 general/envs/<task>/ 任务环境目录（925 个）
 │   ├── prepare_grpo.py         # parquet -> GRPO jsonl（messages + env_config）
 │   ├── prepare_sft.py          # rollout dump -> SFT jsonl（保留成功轨迹）
 │   └── collect_il_demo.py      # 可选：跑 agent 采集成功轨迹
 ├── sandbox/
 │   ├── base.py                 # SandboxBackend 抽象 + ExecResult + 工厂
-│   ├── docker_backend.py       # 一任务一容器（默认，隔离）
-│   ├── local_backend.py        # 临时目录（无隔离，仅测试）
+│   ├── docker_backend.py       # 一任务一容器（默认，隔离；镜像解析/自动 pull/任务级资源）
+│   ├── local_backend.py        # 临时目录（无隔离，仅测试；容器路径映射模拟）
 │   ├── remote_backend.py       # HTTP 客户端
 │   ├── server.py               # 外接 HTTP 沙箱服务（FastAPI）
+│   ├── general_env_setup.py    # general 域 env_task_dir 装配（manifest uploads/MCP/rubrics）
 │   ├── mcp_client.py           # general 域 MCP 工具客户端
 │   ├── Dockerfile / docker-compose.yml / docker-entrypoint.sh
 ├── verifier/
@@ -181,8 +186,8 @@ pip install vllm
 cp .env.example .env            # 按需填写（judge / sandbox 地址等）
 ```
 
-> ms-swift 版本请确保 **>=4.5.3**（`python -c "import swift;print(swift.__version__)"`），
-> 旧版本的多轮 gym 接口可能不同。
+> ms-swift 版本请确保 **>=4.5.2**（`python -c "import swift;print(swift.__version__)"`；
+> 4.5.2 已实测兼容本工程的 gym/GRPO 接口），旧版本的多轮 gym 接口可能不同。
 
 ---
 
@@ -194,6 +199,7 @@ bash scripts/prepare_data.sh
 
 # 方式二：分步、可控
 python -m data.download_dataset --domains code music
+python -m data.image_mapping          # 下载镜像映射表 image-mapping.jsonl（3764 条）
 python -m data.prepare_grpo \
     --domains code music \
     --backend docker \
@@ -201,6 +207,22 @@ python -m data.prepare_grpo \
 # 无 GPU/仅本机演示闭环时，后端用 local（无隔离，仅测试）：
 python -m data.prepare_grpo --domains code music --backend local
 ```
+
+**镜像映射（关键）**：parquet 里的 `docker_image` 是本地别名（如
+`format-code-task-001457:latest`），真实镜像在 Docker Hub 单仓库多 tag：
+`docker.io/xiaomimimo/mimo-v2.6-rl-oss:format-code-task-001457`（tag 名不同）。
+`prepare_grpo` 会按数据集仓的 `image-mapping.jsonl` 把全名写入
+`env_config.dockerhub_image`；`DockerBackend` 优先用它（本地缺失时自动 pull）。
+**general 域**还需要下载任务环境目录（rubric/MCP 工具/工作区文件）：
+
+```bash
+# 全量 925 个任务目录（体积较大，含 workspace 二进制）
+python -m data.download_general_envs
+# 或按已生成的 jsonl 只下载取样到的任务
+python -m data.download_general_envs --from-jsonl data/outputs/grpo_general.jsonl --limit 50
+```
+
+未下载 env_task_dir 的行会被 `prepare_grpo` 跳过并计数（终端打印 skip 统计）。
 
 产物：`data/outputs/grpo_<domain>.jsonl`，每行形如：
 
@@ -210,7 +232,9 @@ python -m data.prepare_grpo --domains code music --backend local
   "env_config": {
     "name": "mimo_env",
     "domain": "code", "dataset_type": "opensource-code",
-    "docker_image": "format-code-task-001457:latest", "cwd": "/testbed",
+    "docker_image": "format-code-task-001457:latest",
+    "dockerhub_image": "docker.io/xiaomimimo/mimo-v2.6-rl-oss:format-code-task-001457",
+    "cwd": "/testbed",
     "problem_statement": "...", "test_command": "...", "test_patch": "...",
     "backend": "docker", "verifier_timeout_sec": 300.0
   }
@@ -230,20 +254,57 @@ python -m data.prepare_grpo --domains code music --backend local
 
 ```bash
 docker version          # daemon 可用
-# 提前拉取任务镜像（小米提供）：
-docker pull xiaomimimo/mimo-v2.6-rl-oss
+# 任务镜像无需手工 pull：env_config.dockerhub_image 指向官方仓 tag，
+# DockerBackend 启动时本地缺失会自动 docker pull（超时 SANDBOX_DOCKER_PULL_TIMEOUT，默认 1800s）。
+# code 2698 + cyber 1000 + webdev 1 + general 65 个镜像均为
+# xiaomimimo/mimo-v2.6-rl-oss 的不同 tag（见 data/raw/image-mapping.jsonl）。
 ```
 
-### 6.2 外接 HTTP 沙箱服务（可选，远程/集中式）
+任务级资源配额：general 域 parquet 携带 `cpus/memory_mb`，会覆盖默认
+`--cpus/--memory`（opts 与环境变量仍可再覆盖）；容器 TTL 取
+`SANDBOX_TTL_SEC + verifier_timeout_sec`。
+
+### 6.2 外接 HTTP 沙箱服务（GPU 实例 + 远程 CPU 服务器，推荐用于 AutoDL 等无法 docker-in-docker 的环境）
+
+架构：GPU 实例只跑 ms-swift 训练 + vLLM 生成（`--backend remote`），沙箱任务全部在
+外接 CPU 服务器的 docker 里以 per-task 容器执行，两者经 HTTP 通信。
+
 ```bash
-# 真实环境用 docker 后端管理 per-task 容器
-bash scripts/start_sandbox.sh
-# 本机无 docker，仅演示服务链路时：
-SANDBOX_BACKEND=local SANDBOX_PORT=8100 bash scripts/start_sandbox.sh
+# ── CPU 服务器侧（如阿里云 2核4G，已装 docker）一键部署 ──
+# 在服务器上 clone 本工程后：
+bash scripts/deploy_sandbox_server.sh
+#  自动完成：venv 轻依赖（无 torch）、/etc/mimo-sandbox.env（随机 token）、
+#  systemd 服务（自启+崩溃拉起）、健康检查；输出 SANDBOX_TOKEN。
+#  2核4G 建议 MAX_SESSIONS=4~8（每个任务容器默认 1g/1cpu，可调）。
+#  阿里云安全组：放行服务端口（默认 8100）TCP，建议仅白名单 GPU 实例出口 IP。
+
+# ── GPU 实例侧（AutoDL）──
+export SANDBOX_URL=http://101.200.134.187:8100
+export SANDBOX_TOKEN=<部署时输出的 token>
+# 数据准备指向远程沙箱：
+python -m data.prepare_grpo --domains code music --backend remote \
+    --sandbox-url $SANDBOX_URL
+# 训练照常（沙箱经 env_config.backend=remote 自动路由）：
+bash scripts/run_grpo.sh code
 ```
-准备数据时指向该服务：`--backend remote --sandbox-url http://<host>:8100`。
-端点：`POST /sessions`、`POST /sessions/{id}/exec`、`POST/GET /sessions/{id}/files`、
-`DELETE /sessions/{id}`、`GET /healthz`（详见 `sandbox/server.py`）。
+
+要点：
+- **鉴权**：服务器设 `SANDBOX_TOKEN` 后，所有业务端点要求 `X-Sandbox-Token`；
+  GPU 侧同名环境变量注入（token 不写入训练数据）。
+- **并发闸门**：服务器 `SANDBOX_MAX_CONCURRENT_SESSIONS=N` 达上限时新 session
+  **排队**（不拒绝），小内存机器不会被一个 GRPO batch 打爆。
+- **镜像**：服务器侧 docker run 时本地缺失自动 pull
+  （`env_config.dockerhub_image` → `xiaomimimo/mimo-v2.6-rl-oss:<tag>`）；
+  首个 epoch 拉取较慢（约 3764 个 tag），可预热常用域：
+  `docker pull xiaomimimo/mimo-v2.6-rl-oss:webdev-rl-opensource` 等。
+- **general 域**：env_task_dir 文件在 GPU 实例本地，`RemoteBackend.upload_dir`
+  会自动打 tar 经 HTTP 传入服务器容器（`POST /sessions/{id}/upload_dir`）。
+- **长命令**：exec 的 HTTP 超时随命令 timeout 自动放大（verifier 默认 300s+60s），
+  建会话放宽到 900s 以覆盖服务端 pull 镜像耗时。
+
+端点（OpenAPI 见 `/docs`）：`POST /sessions`、`POST /sessions/{id}/exec`、
+`POST/GET /sessions/{id}/files`、`POST /sessions/{id}/upload_dir`、
+`DELETE /sessions/{id}`、`GET /healthz`（免鉴权探活）。详见 `sandbox/server.py`。
 
 ### 6.3 Local（无隔离，仅测试）
 `--backend local` 会在临时目录直接执行命令，**严禁用于不可信模型/生产**（启动有显著警告，
@@ -297,19 +358,30 @@ python -m py_compile $(find . -name "*.py" -not -path "*/research/*")
 python -m pytest -q
 ```
 
-**本机已实际执行的验证（2026-10-08）：**
+**本机已实际执行的验证（2026-10-18 更新）：**
 - ✅ 全部 Python 文件 `py_compile` 通过。
-- ✅ `prepare_grpo` 对真实 parquet（music 全量 + 其余各域取样）跑通，`env_config.name=='mimo_env'`、
-  `TaskSpec.from_env_config` 可逆、domain 正确。
-- ✅ `prepare_sft` 成功/失败/基建三类轨迹过滤正确。
-- ✅ LocalBackend：命令执行、读写、超时（returncode 124）、路径穿越拦截均实测通过。
+- ✅ `prepare_grpo` 对**全量真实 parquet**（5 域 7780 行）跑通：6855 行产出
+  （general 域 925 行因 env_task_dir 未下载按设计跳过），0 坏行；
+  code/webdev/cyber/general 四域 `dockerhub_image` 注入率 100%。
+- ✅ **image-mapping 链路**：`image-mapping.jsonl`（3764 条）加载、别名→官方仓 tag
+  解析、`TaskSpec.dockerhub_image` 往返、`DockerBackend._resolve_image` 优先序均有单测。
+- ✅ **general 域真实任务装配**（s3k_0000_accounting_audit_tax_en_t1_rl_008）：
+  manifest uploads 27 文件落位（含 pptx 二进制）、6 条 rubric（verifier_meta.items）
+  装配、4 个 MCP server 配置注入；mimo_env reset→bash→submit 闭环实测。
+- ✅ LocalBackend：命令执行、读写、超时（returncode 124）、`../` 逃逸拦截、
+  容器绝对路径映射（/work 等前缀）均实测通过。
 - ✅ **端到端闭环**：mock 模型输出 → 沙箱真实执行 → verifier 打分：
-  Code 正确=1/错误=0；Music 合法=高分/非法=0。
-- 测试结果：**15 passed**；gym 适配用例在安装 ms-swift 后追加运行（见下）。
+  Code 正确=1/错误=0；Music 合法=高分/非法=0；General 官方 verify（docker 语义
+  mock 后端）reward.json 读取、masking 契约（reward_error→infra）覆盖。
+- 测试结果：**32 passed**（pytest 8.x，conda env `my-ms-swift`）。
 
 **因资源/环境未实际运行（如实说明，未谎称通过）：**
-- ❌ 未跑真实 **GPU GRPO 训练**（本机无 GPU/无多卡、无 vLLM）；配置参数名均按 4.5.3 源码核实。
-- ❌ **DockerBackend 未实跑**（本机无 docker daemon）；其命令拼装、隔离/TTL 逻辑经静态核对。
+- ❌ 未跑真实 **GPU GRPO 训练**（本机无 GPU/无多卡）；配置参数名均按已装 4.5.2 源码逐一核实。
+- ❌ **DockerBackend 未实跑**（本机无 docker daemon）；镜像解析/自动 pull/资源参数/
+  upload_dir 经静态核对 + 单测（`_resolve_image` 优先序、任务级 cpus/memory 覆盖）。
+- ⚠️ general 域 MCP setup 与官方 `run_verify.py` 依赖官方镜像内环境
+  （/opt/openai-agents-venv、/work 布局），**仅 docker/remote 后端可用**；
+  local 后端按设计降级（跳过 MCP setup、LLM judge 兜底打分）。
 - ⚠️ Cyber 依赖每任务镜像内的 `server_arvo.py`、WebDev 组级相对排序依赖外部 grader 服务、
   Music 高级 18 特征依赖 `abc2midi` 与人类参考分布：这些外部依赖缺失时按文档降级，逻辑已对齐。
 
@@ -319,7 +391,9 @@ python -m pytest -q
 
 | 现象 | 原因/处理 |
 |---|---|
-| `No module named swift` | `pip install "ms-swift>=4.5.3"`；训练必须安装。 |
+| `No module named swift` | `pip install "ms-swift>=4.5.2"`；训练必须安装。 |
+| `docker pull failed for ...` | 确认 `data/raw/image-mapping.jsonl` 已生成（`python -m data.image_mapping`）；或手工 `docker pull xiaomimimo/mimo-v2.6-rl-oss:<tag>` 后 `docker tag`。 |
+| `env_task_dir not found locally` | 下载 general 任务环境：`python -m data.download_general_envs --tasks <task_id>`（或 `--from-jsonl`）。 |
 | `docker daemon unavailable` | 启动 Docker；或改用 `--backend local`（仅测试）/`remote`。 |
 | code 任务大量 `is_infra` | 多为镜像基线/补丁问题：确认镜像内是 git 仓库、test_patch 可 `git apply`。 |
 | General 直接 `is_infra` | 未配置 judge：设置 `JUDGE_BASE_URL/JUDGE_API_KEY/JUDGE_MODEL`。 |
