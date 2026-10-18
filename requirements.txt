@@ -1,0 +1,30 @@
+# ===== MiMo Agent GRPO (MS-Swift) 依赖 =====
+# 注意：torch / vllm 与 CUDA 版本强相关，请按本机环境安装匹配版本；
+# 这里不严格 pin torch/vllm，以免覆盖你已有的 CUDA 环境。
+# 参考安装：
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   pip install vllm
+
+# --- 训练框架（版本已核实，GRPO gym env 集成需要 >=4.5.3）---
+ms-swift>=4.5.3
+trl>=0.20            # ms-swift 硬要求
+
+# --- 数据处理 ---
+pyarrow>=14.0.0
+pandas>=2.0.0
+huggingface_hub>=0.24.0
+datasets>=2.20.0
+
+# --- 外接沙箱 HTTP 服务 / 远程后端 / LLM 判官 ---
+fastapi>=0.110.0
+uvicorn>=0.29.0
+httpx>=0.27.0
+# openai>=1.30.0     # 可选，若你想用 openai SDK 写 policy/judge
+
+# --- 测试 ---
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+
+# --- 可选：Music 高级特征打分需要 abc2midi / abc2abc（系统级，非 pip）---
+# Debian/Ubuntu: apt-get install abcmidi
+# 未安装时 MusicVerifier 仅做结构性规则打分（见 verifier/music_verifier.py）。

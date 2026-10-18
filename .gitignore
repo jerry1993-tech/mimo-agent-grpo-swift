@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Env / secrets
+.env
+
+# Logs
+*.log
+
+# Training outputs / checkpoints
+outputs/
+runs/
+checkpoints/
+*.safetensors
+*.bin
+*.pt

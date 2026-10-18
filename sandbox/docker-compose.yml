@@ -1,0 +1,22 @@
+# 可选：一键拉起外接沙箱 server（构建通用镜像 + 端口映射）。
+# 用法：docker compose -f sandbox/docker-compose.yml up --build
+#
+# 注意：server 端每个 session 默认再起一个 docker 容器，因此把 docker.sock 挂进来，
+# 让容器内的 docker CLI 驱动宿主机 daemon（docker-outside-of-docker 模式）。
+services:
+  mimo-sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mimo-generic-sandbox:latest
+    # server 本身跑在容器里；实际任务容器由 server 通过挂载的 docker.sock 拉起
+    # 若只想本机演示（无 docker），把 SANDBOX_BACKEND 设为 local。
+    environment:
+      - SANDBOX_BACKEND=docker        # 本机无 docker 时改为 local
+      - SANDBOX_HOST=0.0.0.0
+      - SANDBOX_PORT=8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped

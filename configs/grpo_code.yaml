@@ -1,0 +1,57 @@
+# =====================================================================
+# GRPO - Code(SWE) 域，多轮交互式 Agent + 外接沙箱 + 隐藏测试 verifier
+# 用法（工程根目录）：
+#   python swift_agent/train_entry.py configs/grpo_code.yaml
+# train_entry.py 会先注册 mimo_env / 自定义 reward，再调用 swift rlhf。
+# 参数名以 ms-swift 4.5.3 源码为准（swift/arguments/rlhf_args.py）。
+# =====================================================================
+
+# --- 多卡时通过 ENV 注入（可选）---
+# ENV:
+#   NPROC_PER_NODE: '8'
+
+rlhf_type: grpo
+model: XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B
+dataset: data/outputs/grpo_code.jsonl
+
+# --- 多轮交互式环境（GYMScheduler + 我们注册的 mimo_env）---
+multi_turn_scheduler: gym_scheduler
+gym_env: mimo_env
+use_gym_env: true
+max_turns: 20
+completion_length_limit_scope: per_round
+
+# --- rollout 采样（小米：temperature=1.0, top_p=0.95, top_k=20）---
+temperature: 1.0
+top_p: 0.95
+top_k: 20
+num_generations: 8            # 小米生产用 16；单卡/显存有限请降到 4~8
+max_completion_length: 2048
+
+# --- vLLM（colocate：训练进程内同卡）---
+use_vllm: true
+vllm_mode: colocate
+vllm_gpu_memory_utilization: 0.5
+vllm_max_model_len: 32768
+vllm_enable_prefix_caching: true
+
+# --- GRPO 对齐小米：无 KL(beta=0)、组内仅减均值不除 std、clip 0.2 ---
+beta: 0.0
+scale_rewards: none  # GRPO 仍会组内减均值；none=不除 std，对齐小米 norm_adv_by_std=false
+epsilon: 0.2
+advantage_estimator: grpo
+
+# --- 优化（小米 lr=1e-6 constant）---
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 8
+learning_rate: 1.0e-6
+lr_scheduler_type: constant
+num_train_epochs: 1
+gradient_checkpointing: true
+max_length: 32768
+
+# --- 记录与保存 ---
+save_steps: 50
+logging_steps: 5
+log_completions: true
+output_dir: runs/grpo_code

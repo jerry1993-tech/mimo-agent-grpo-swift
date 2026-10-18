@@ -1,0 +1,7 @@
+{
+  "domain": "music",
+  "dataset_type": "music",
+  "instance_id": "demo-music-1",
+  "problem_statement": "Compose a short 4/4 tune at 120 BPM for 2 voices in C major.",
+  "music_meta": {"meter": "4/4", "bpm": 120, "nvoice_want": 2, "length": "short", "lang": "en"}
+}

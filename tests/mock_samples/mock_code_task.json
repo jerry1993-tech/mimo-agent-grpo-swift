@@ -1,0 +1,10 @@
+{
+  "domain": "code",
+  "dataset_type": "opensource-code",
+  "instance_id": "demo-code-fib",
+  "cwd": "",
+  "problem_statement": "Implement fib(n) in solution.py so that fib(10) == 55.",
+  "test_command": "python test_solution.py",
+  "verifier_timeout_sec": 60,
+  "test_patch": "diff --git a/test_solution.py b/test_solution.py\nnew file mode 100644\n--- /dev/null\n+++ b/test_solution.py\n@@ -0,0 +1,3 @@\n+from solution import fib\n+assert fib(10) == 55\n+print('ok')\n"
+}
