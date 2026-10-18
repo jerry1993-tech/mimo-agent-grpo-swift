@@ -82,19 +82,30 @@ class DockerBackend(SandboxBackend):
 
     async def _ensure_image(self, image: str) -> None:
         """镜像本地不存在时自动 docker pull（仅对 xiaomimimo/ 官方仓可靠；
-        其它名字 pull 失败不吞，由 start() 报错）。"""
+        其它名字 pull 失败不吞，由 start() 报错）。
+
+        公共加速器拉大镜像（1~2GB）常出现中途 connection reset，
+        这里按 SANDBOX_DOCKER_PULL_RETRIES（默认 2）次重试；docker 分层缓存
+        使重试从断点续传。仍失败则报错并提示预拉取脚本。
+        """
         out, err, rc = await self._run(
             ['docker', 'image', 'inspect', image], wall_timeout=30.0)
         if rc == 0:
             return
-        pull_argv = ['docker', 'pull', image]
-        out, err, rc = await self._run(pull_argv, wall_timeout=self._pull_timeout)
-        if rc != 0:
-            raise RuntimeError(
-                f'docker pull failed for {image} (rc={rc}): {err.strip()[:500]}. '
-                f'若为任务镜像，请确认 data/raw/image-mapping.jsonl 已生成 env_config.dockerhub_image，'
-                f'或手工 docker pull xiaomimimo/mimo-v2.6-rl-oss:<tag> 后 docker tag。'
-            )
+        retries = int(_os.environ.get('SANDBOX_DOCKER_PULL_RETRIES', '2') or 0)
+        last_err = ''
+        for attempt in range(1 + max(0, retries)):
+            out, err, rc = await self._run(
+                ['docker', 'pull', image], wall_timeout=self._pull_timeout)
+            if rc == 0:
+                return
+            last_err = err.strip()[:500]
+        raise RuntimeError(
+            f'docker pull failed for {image} after {1 + max(0, retries)} attempts '
+            f'(rc={rc}): {last_err}. '
+            f'建议：1) 服务器侧预拉取 bash scripts/prefetch_images.sh <list>；'
+            f'2) 阿里云 ECS 优先配置专属加速器（容器镜像服务->镜像加速器）。'
+        )
 
     @property
     def _pull_timeout(self) -> float:

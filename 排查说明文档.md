@@ -294,9 +294,18 @@ bash scripts/run_grpo.sh code
 - **并发闸门**：服务器 `SANDBOX_MAX_CONCURRENT_SESSIONS=N` 达上限时新 session
   **排队**（不拒绝），小内存机器不会被一个 GRPO batch 打爆。
 - **镜像**：服务器侧 docker run 时本地缺失自动 pull
-  （`env_config.dockerhub_image` → `xiaomimimo/mimo-v2.6-rl-oss:<tag>`）；
-  首个 epoch 拉取较慢（约 3764 个 tag），可预热常用域：
-  `docker pull xiaomimimo/mimo-v2.6-rl-oss:webdev-rl-opensource` 等。
+  （`env_config.dockerhub_image` → `xiaomimimo/mimo-v2.6-rl-oss:<tag>`）。
+  **国内服务器务必先配可靠加速器**（实测公共加速器对本仓不可靠：白名单拒绝/层损坏），
+  阿里云 ECS 用控制台"容器镜像服务→镜像加速器"的专属地址写入 daemon.json；
+  code 域 2698 个任务镜像各 1~2GB，**训练前预拉取**更稳：
+  ```bash
+  # GPU 实例：生成取样清单并传给服务器
+  python -m data.gen_image_list data/outputs/grpo_code.jsonl -o grpo_code.list
+  scp grpo_code.list user@<sandbox-server>:~/mimo-agent-grpo-swift/
+  # 服务器：并发预拉取（分层缓存，断点续传，失败可重跑）
+  bash scripts/prefetch_images.sh grpo_code.list
+  ```
+  pull 偶发断流时 DockerBackend 自动重试（`SANDBOX_DOCKER_PULL_RETRIES`，默认 2）。
 - **general 域**：env_task_dir 文件在 GPU 实例本地，`RemoteBackend.upload_dir`
   会自动打 tar 经 HTTP 传入服务器容器（`POST /sessions/{id}/upload_dir`）。
 - **长命令**：exec 的 HTTP 超时随命令 timeout 自动放大（verifier 默认 300s+60s），

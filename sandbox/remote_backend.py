@@ -63,11 +63,13 @@ class RemoteBackend(SandboxBackend):
     # ------------------------------------------------------------------
     async def start(self) -> None:
         env_config = self.spec.to_env_config()
-        # 会话创建可能触发服务端 docker pull（大镜像分钟级）：放宽建连后的总超时。
+        # 会话创建可能触发服务端 docker pull（任务镜像 1~2GB，公共加速器下更久）：
+        # 总超时取 SANDBOX_CREATE_TIMEOUT（默认 1800s，与服务端 pull 墙钟一致）。
+        create_timeout = float(_os.environ.get('SANDBOX_CREATE_TIMEOUT', '1800'))
         try:
             resp = await self.client.post(
                 '/sessions', json=env_config,
-                timeout=max(self._http_timeout, 900.0))
+                timeout=max(self._http_timeout, create_timeout))
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
