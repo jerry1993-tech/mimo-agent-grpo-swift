@@ -74,3 +74,36 @@ async def test_gym_music():
         assert done and info.get('is_infra') is False and r >= 0.9
     finally:
         await env.close()
+
+
+async def test_gym_scheduler_closes_env_at_max_turns():
+    """MiMoGymScheduler：max_turns 到顶的轨迹必须关闭 env（防会话泄漏）。"""
+    from types import SimpleNamespace
+    from swift_agent.mimo_env import MiMoGymScheduler
+
+    class _FakeEnv:
+        def __init__(self):
+            self.closed = False
+
+        async def step(self, action):
+            return 'obs', 0.0, False, {}
+
+        async def close(self):
+            self.closed = True
+
+    sched = MiMoGymScheduler(infer_engine=None, max_turns=2)
+    fake = _FakeEnv()
+    req = SimpleNamespace(uuid='u1', messages=[{'role': 'assistant', 'content': 'x'}])
+    sched._envs['u1'] = fake
+    sched._total_rewards['u1'] = 0.0
+    sched._step_rewards['u1'] = []
+    sched._pending_obs['u1'] = None
+
+    # 第 1 轮：未到 max_turns，不关闭
+    r1 = await sched.on_turn_end(req, None, 1)
+    assert not r1['done'] and not fake.closed
+    # 第 2 轮：到达 max_turns，关闭
+    r2 = await sched.on_turn_end(req, None, 2)
+    assert not r2['done'] and fake.closed
+    assert r2['rollout_infos'].get('stop_reason') == 'max_turns'
+    assert 'u1' not in sched._envs

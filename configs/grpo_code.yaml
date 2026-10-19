@@ -3,7 +3,7 @@
 # 用法（工程根目录）：
 #   python swift_agent/train_entry.py configs/grpo_code.yaml
 # train_entry.py 会先注册 mimo_env / 自定义 reward，再调用 swift rlhf。
-# 参数名以 ms-swift 4.5.3 源码为准（swift/arguments/rlhf_args.py）。
+# 参数名以 ms-swift 4.5.2 源码为准（swift/arguments/rlhf_args.py）。
 # =====================================================================
 
 # --- 多卡时通过 ENV 注入（可选）---
@@ -11,7 +11,9 @@
 #   NPROC_PER_NODE: '8'
 
 rlhf_type: grpo
-model: XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B
+model: /root/autodl-tmp/models/MiMo-V2.6-Distill-Qwen-9B
+model_type: qwen3_5   # 消歧（swift 自动匹配会在 qwen3_5/ovis_ocr2 间撞车）
+template: qwen3_5      # 模板消歧（qwen3_5 vs qwen3_8 撞车；含 agent_template+thinking 处理）
 dataset: data/outputs/grpo_code.jsonl
 
 # --- 多轮交互式环境（GYMScheduler + 我们注册的 mimo_env）---
@@ -34,6 +36,9 @@ vllm_mode: colocate
 vllm_gpu_memory_utilization: 0.5
 vllm_max_model_len: 32768
 vllm_enable_prefix_caching: true
+# LoRA 训练必须开：colocate 引擎经 vLLM LoRA 热更新同步 adapter 权重，
+# 否则 rollout 用的是基础模型（off-policy；swift 默认 False 会静默生效）
+vllm_enable_lora: true
 
 # --- GRPO 对齐小米：无 KL(beta=0)、组内仅减均值不除 std、clip 0.2 ---
 beta: 0.0
@@ -41,7 +46,16 @@ scale_rewards: none  # GRPO 仍会组内减均值；none=不除 std，对齐小�
 epsilon: 0.2
 advantage_estimator: grpo
 
-# --- 优化（小米 lr=1e-6 constant）---
+# --- 优化（小米 lr=1e-6 constant；LoRA 训练沿用小米学习率）---
+tuner_type: lora
+lora_rank: 8
+lora_alpha: 32
+target_modules: all-linear
+lora_dropout: 0.05
+
+# 注意：batch × grad_accum = 每批并发环境数（此处 2×8=16），
+# 远程沙箱的 SANDBOX_MAX_CONCURRENT_SESSIONS 必须 >= 该值；
+# 小服务器请改用 configs/grpo_code_smoke.yaml（1×2=2）。
 per_device_train_batch_size: 2
 gradient_accumulation_steps: 8
 learning_rate: 1.0e-6
@@ -54,4 +68,4 @@ max_length: 32768
 save_steps: 50
 logging_steps: 5
 log_completions: true
-output_dir: runs/grpo_code
+output_dir: runs/grpo_code_lora

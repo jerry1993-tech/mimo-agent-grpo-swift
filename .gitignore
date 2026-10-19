@@ -23,3 +23,6 @@ checkpoints/
 *.safetensors
 *.bin
 *.pt
+
+# Generated image lists
+*.list

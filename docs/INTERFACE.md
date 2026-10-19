@@ -2,7 +2,7 @@
 
 > 本文件是 `mimo-agent-grpo-swift` 各模块之间的**契约**。所有并行实现必须严格遵守，
 > 不得擅自更改类名、方法签名、返回结构与字段名。实现细节（内部算法）可自由发挥。
-> 版本基准：ms-swift **4.5.3**；数据集 `XiaomiMiMo/MiMo-V2.6-RL-oss`（Apache-2.0）。
+> 版本基准：ms-swift **4.5.2**；数据集 `XiaomiMiMo/MiMo-V2.6-RL-oss`（Apache-2.0）。
 
 ## 0. 总体数据流（与小米 VERL 对齐）
 

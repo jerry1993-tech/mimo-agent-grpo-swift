@@ -8,7 +8,7 @@ on-policy），而是实现 ms-swift 原生的 ``swift.rollout.gym_env.Env`` 并
 - submit 时：调用领域 verifier（真实执行 hidden 测试 / rubric / 规则），最终步一次性返回
   outcome 且 done=True —— 对齐小米“逐轮 generate+observation 回灌、末位单点 outcome reward”。
 
-API 依据（ms-swift 4.5.3）：
+API 依据（ms-swift 4.5.2）：
 - swift/rollout/gym_env.py 的 Env(reset/step/close) 与 envs 注册表
 - swift/rollout/multi_turn.py 的 GYMScheduler（total_reward 累积、observation 以 user 角色回灌）
 - swift/rl_core/grpo_algorithm.py（use_gym_env 时读 rollout_infos['total_reward'] 作为 reward）
@@ -26,6 +26,7 @@ if _ROOT not in sys.path:
 from typing import Any, Dict, Optional  # noqa: E402
 
 from swift.rollout.gym_env import Env, envs  # noqa: E402
+from swift.rollout.multi_turn import GYMScheduler, multi_turns  # noqa: E402
 
 from swift_agent.spec import TaskSpec, GYM_ENV_NAME  # noqa: E402
 from swift_agent.tool_parser import (  # noqa: E402
@@ -35,8 +36,8 @@ from swift_agent.turn_executor import execute_calls, finalize  # noqa: E402
 from sandbox.base import get_backend  # noqa: E402
 
 _NO_TOOL_HINT = (
-    'No <tool_call> detected. You MUST either take an action with\n'
-    '<tool_call>\n{"name": "bash", "arguments": {"command": "..."}}\n</tool_call>\n'
+    'No tool call detected. You MUST either take an action with the native tool-call format\n'
+    '<tool_call>\n<function=bash>\n<parameter=command>\nyour command\n</parameter>\n</function>\n</tool_call>\n'
     'or finish with the "submit" tool.'
 )
 
@@ -53,6 +54,11 @@ class MiMoAgentEnv(Env):
 
     # ------------------------------------------------------------------
     async def reset(self, config) -> tuple[str, Dict[str, Any], str]:
+        # music 域：无沙箱（纯文本 ABC 记谱 + 规则打分），不启动任何后端
+        if self.spec.domain == 'music':
+            system_prompt = build_system_prompt(self.spec, extra_tools=None)
+            return self.spec.problem_statement, {'task': self.spec.summary()}, system_prompt
+
         # 启动专属隔离后端（docker/local/remote）
         self.backend = get_backend(self.spec)
         await self.backend.start()
@@ -153,3 +159,28 @@ class MiMoAgentEnv(Env):
 
 # 注册到 ms-swift 的 env 注册表（GYMScheduler._create_env 读 env_config['name']）
 envs[GYM_ENV_NAME] = MiMoAgentEnv
+
+
+class MiMoGymScheduler(GYMScheduler):
+    """GYMScheduler + 轨迹到达 max_turns 时关闭 env。
+
+    swift 4.5.2 的 GYMScheduler 只在 on_turn_end 返回 done=True 时关闭 env；
+    轨迹以 max_turns 到顶结束时（run_multi_turn 直接 stop）不会触发 close，
+    导致沙箱会话/容器泄漏，长时间训练会耗尽服务器并发上限并卡死下一批
+    on_trajectory_start。这里在最后一轮结束时主动关闭。
+    """
+
+    async def on_turn_end(self, infer_request, response_choice, current_turn):
+        result = await super().on_turn_end(infer_request, response_choice, current_turn)
+        if not result.get('done') and self.max_turns and current_turn >= int(self.max_turns):
+            uid = getattr(infer_request, 'uuid', None)
+            if uid is not None and self._envs.get(uid) is not None:
+                await self._close_and_remove(uid)
+                infos = result.get('rollout_infos') or {}
+                infos.setdefault('stop_reason', 'max_turns')
+                result['rollout_infos'] = infos
+        return result
+
+
+# 覆盖注册名（配置里仍写 multi_turn_scheduler: gym_scheduler）
+multi_turns['gym_scheduler'] = MiMoGymScheduler

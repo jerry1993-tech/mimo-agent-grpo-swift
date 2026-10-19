@@ -12,7 +12,7 @@
 
 参考（小米多轮工具解析）：
 - https://github.com/XiaomiMiMo/verl/blob/mimo-oss/recipes/arvo/agent_loop.py  (ToolParser)
-- https://github.com/modelscope/ms-swift/blob/v4.5.3/swift/rollout/gym_env.py
+- https://github.com/modelscope/ms-swift/blob/v4.5.2/swift/rollout/gym_env.py
 """
 from __future__ import annotations
 
@@ -33,6 +33,11 @@ _TOOL_CALL_RE = re.compile(
     r'(?:<tool_call>|```tool_call)\s*(.*?)\s*(?:</tool_call>|```)',
     re.DOTALL,
 )
+
+# Qwen 原生 XML 工具调用格式（qwen3_coder 解析器同款；MiMo 蒸馏模型原生输出）：
+#   <tool_call><function=bash><parameter=command>ls -la</parameter></function></tool_call>
+_FUNC_XML_RE = re.compile(r'<function=([^<>\s]+)>\s*(.*?)\s*</function>', re.DOTALL)
+_PARAM_XML_RE = re.compile(r'<parameter=([^<>\s]+)>\s*(.*?)\s*</parameter>', re.DOTALL)
 
 
 @dataclass
@@ -110,25 +115,51 @@ BUILTIN_TOOLS: List[Dict[str, Any]] = [
 BUILTIN_TOOL_NAMES = {t['function']['name'] for t in BUILTIN_TOOLS}
 
 
+def _parse_xml_call(body: str) -> Optional[ToolCall]:
+    """解析 Qwen 原生 XML 工具调用：<function=NAME><parameter=K>v</parameter>...</function>。"""
+    m = _FUNC_XML_RE.search(body)
+    if not m:
+        return None
+    name = m.group(1).strip()
+    inner = m.group(2)
+    args: Dict[str, Any] = {}
+    for pm in _PARAM_XML_RE.finditer(inner):
+        key = pm.group(1).strip()
+        raw = pm.group(2).strip()
+        parsed = _safe_json_loads(raw, default=None)
+        args[key] = parsed if parsed is not None else raw
+    return ToolCall(name=name, arguments=args, raw=body)
+
+
 def parse_tool_calls(text: str) -> List[ToolCall]:
-    """从 assistant 文本中抽取全部工具调用。非法块跳过（不抛异常）。"""
+    """从 assistant 文本中抽取全部工具调用。非法块跳过（不抛异常）。
+
+    支持两种格式（前者为 MiMo 蒸馏模型原生输出，后者为本工程文档格式）：
+    1. Qwen XML：<tool_call><function=bash><parameter=command>...</parameter></function></tool_call>
+    2. JSON：<tool_call>{"name": "bash", "arguments": {...}}</tool_call>
+    """
     calls: List[ToolCall] = []
     if not text:
         return calls
     for i, m in enumerate(_TOOL_CALL_RE.finditer(text)):
         body = m.group(1).strip()
         obj = _safe_json_loads(body, default=None)
-        if not isinstance(obj, dict):
+        if isinstance(obj, dict):
+            name = obj.get('name')
+            if not name or not isinstance(name, str):
+                continue
+            args = obj.get('arguments', {})
+            if isinstance(args, str):
+                args = _safe_json_loads(args, default={}) or {}
+            if not isinstance(args, dict):
+                args = {}
+            calls.append(ToolCall(name=name, arguments=args, raw=body, index=i))
             continue
-        name = obj.get('name')
-        if not name or not isinstance(name, str):
-            continue
-        args = obj.get('arguments', {})
-        if isinstance(args, str):
-            args = _safe_json_loads(args, default={}) or {}
-        if not isinstance(args, dict):
-            args = {}
-        calls.append(ToolCall(name=name, arguments=args, raw=body, index=i))
+        # JSON 解析失败 -> 尝试 Qwen XML 原生格式
+        xml_call = _parse_xml_call(body)
+        if xml_call is not None:
+            xml_call.index = i
+            calls.append(xml_call)
     return calls
 
 
@@ -157,10 +188,16 @@ def render_error(name: str, message: str) -> str:
 DEFAULT_SYSTEM_PROMPT = """You are MiMo, an expert autonomous software & knowledge agent. \
 You solve tasks by interacting with an isolated environment through tools.
 
-For every action, output ONE tool call using this exact format (JSON only inside the tags):
+For every action, output ONE tool call using this exact format:
 <tool_call>
-{{"name": "<tool_name>", "arguments": {{...}}}}
+<function=bash>
+<parameter=command>
+your shell command here
+</parameter>
+</function>
 </tool_call>
+
+(A JSON form <tool_call>{{"name": "bash", "arguments": {{...}}}}</tool_call> is also accepted.)
 
 Available tools:
 - bash(command, timeout?): run a shell command in the task container.
@@ -169,7 +206,7 @@ Available tools:
 - submit(answer?): finish the task; the environment then runs the hidden verifier.
 
 Rules:
-1. Think step by step, but a <tool_call> block must contain valid JSON and nothing else.
+1. Think step by step, but a <tool_call> block must contain exactly one function call.
 2. You may inspect and modify files freely; the hidden tests are NOT present until you submit.
 3. When the task is complete, call submit; do not keep acting after submitting.
 4. Tool outputs are wrapped in <tool_result> tags; read them before the next action."""

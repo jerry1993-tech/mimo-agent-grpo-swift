@@ -6,9 +6,15 @@
 # 由 data/outputs/rollout_dump.jsonl 过滤 reward==1 生成）做等价 IL 预热。
 # 数据为 ms-swift messages 格式（含 tool_call / tool_response）。
 # =====================================================================
-model: Qwen/Qwen3-8B
+model: /root/autodl-tmp/models/MiMo-V2.6-Distill-Qwen-9B
+model_type: qwen3_5   # 消歧（swift 自动匹配会在 qwen3_5/ovis_ocr2 间撞车）
+template: qwen3_5      # 模板消歧（qwen3_5 vs qwen3_8 撞车；含 agent_template+thinking 处理）
 dataset: data/outputs/sft.jsonl
-train_type: lora               # 资源充足可改 full
+tuner_type: lora             # 统一 LoRA（swift 4.5.2 参数名）
+lora_rank: 8
+lora_alpha: 32
+target_modules: all-linear
+lora_dropout: 0.05
 torch_type: bfloat16
 
 num_train_epochs: 1
@@ -17,7 +23,6 @@ gradient_accumulation_steps: 8
 learning_rate: 1.0e-5
 max_length: 32768
 gradient_checkpointing: true
-lora_rank: 16
 
 save_steps: 100
 logging_steps: 5

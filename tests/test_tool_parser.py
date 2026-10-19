@@ -47,3 +47,36 @@ def test_render_observation():
     assert '<tool_result' in ok and 'status="result"' in ok
     err = render_error('bash', 'boom')
     assert 'status="error"' in err and 'boom' in err
+
+
+def test_parse_qwen_xml_format():
+    """MiMo/Qwen 原生 XML 工具调用（实际 rollout 观测到的格式）。"""
+    text = (
+        '<think>\n\n</think>\n\nLet me check.<tool_call><function=bash>'
+        '<parameter=command>ls -la /testbed; find . -name "*.go" | head</parameter>'
+        '</function></tool_call>'
+    )
+    calls = parse_tool_calls(text)
+    assert len(calls) == 1
+    assert calls[0].name == 'bash'
+    assert calls[0].arguments['command'] == 'ls -la /testbed; find . -name "*.go" | head'
+
+
+def test_parse_qwen_xml_multiple_params_and_json_value():
+    text = (
+        '<tool_call><function=write_file>'
+        '<parameter=path>a.py</parameter>'
+        '<parameter=content>"def f():\\n    return 1"</parameter>'
+        '</function></tool_call>'
+    )
+    calls = parse_tool_calls(text)
+    assert calls[0].name == 'write_file'
+    assert calls[0].arguments['path'] == 'a.py'
+    # JSON 编码的字符串参数会被解码
+    assert calls[0].arguments['content'] == 'def f():\n    return 1'
+
+
+def test_parse_qwen_xml_submit():
+    text = '<tool_call><function=submit><parameter=answer>done</parameter></function></tool_call>'
+    calls = parse_tool_calls(text)
+    assert is_submit(calls) and calls[0].arguments['answer'] == 'done'

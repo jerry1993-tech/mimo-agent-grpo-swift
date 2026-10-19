@@ -24,7 +24,7 @@ set -euo pipefail
 INSTALL_DIR="${INSTALL_DIR:-/opt/mimo-sandbox}"
 SERVICE_NAME="mimo-sandbox"
 PORT="${SANDBOX_PORT:-8100}"
-MAX_SESSIONS="${MAX_SESSIONS:-8}"          # 2核4G 建议 4~8；每容器默认 2g/2cpu
+MAX_SESSIONS="${MAX_SESSIONS:-8}"          # 2核4G 实测建议 2（每容器默认 1g/1cpu，见下方 env 文件）
 TOKEN="${SANDBOX_TOKEN:-$(head -c 24 /dev/urandom | base64 | tr -d '/+=' | head -c 32)}"
 ENV_FILE="/etc/mimo-sandbox.env"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -103,6 +103,10 @@ SANDBOX_PORT=$PORT
 SANDBOX_BACKEND=docker
 SANDBOX_TOKEN=$TOKEN
 SANDBOX_MAX_CONCURRENT_SESSIONS=$MAX_SESSIONS
+# 会话空闲回收（训练侧 max_turns 到顶不调用 close，靠这里兜底防泄漏）
+SANDBOX_SESSION_IDLE_TTL=900
+# create 排队上限（超时 503，避免训练侧无限阻塞）
+SANDBOX_CREATE_WAIT=600
 # 任务容器资源默认值（可被每任务的 cpus/memory_mb 覆盖）
 SANDBOX_DOCKER_MEMORY=1g
 SANDBOX_DOCKER_CPUS=1.0

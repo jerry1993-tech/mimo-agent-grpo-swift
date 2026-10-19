@@ -65,20 +65,41 @@ def task_dirs_of(files: "list[str]") -> "set[str]":
     return dirs
 
 
+def _download_one(rel: str, output_dir: str) -> str:
+    """下载单个文件：ModelScope 直链（默认，国内快）或 HF（MS_CHANNEL=hf）。"""
+    dest = os.path.join(output_dir, rel)
+    if os.path.exists(dest):
+        return dest
+    os.makedirs(os.path.dirname(dest) or output_dir, exist_ok=True)
+    tmp = dest + '.tmp'
+    channel = os.environ.get('MS_CHANNEL', 'modelscope')
+    if channel == 'modelscope':
+        import urllib.request
+        url = (f'https://modelscope.cn/api/v1/datasets/{REPO_ID}/repo'
+               f'?Revision=master&FilePath={rel}')
+        urllib.request.urlretrieve(url, tmp)
+    else:
+        from huggingface_hub import hf_hub_download
+        p = hf_hub_download(repo_id=REPO_ID, filename=rel, repo_type='dataset',
+                            local_dir=output_dir)
+        if os.path.abspath(p) != os.path.abspath(dest):
+            os.replace(p, dest)
+        return dest
+    os.replace(tmp, dest)
+    return dest
+
+
 def download_task_dir(task: str, output_dir: str, files: "list[str]") -> int:
     """下载单个任务目录全部文件（已存在跳过）。返回新下载文件数。"""
-    from huggingface_hub import hf_hub_download
     prefix = f"{ENVS_PREFIX}{task}/"
     n = 0
     for rel in files:
         if not rel.startswith(prefix):
             continue
-        local = os.path.join(output_dir, rel)
-        if os.path.exists(local):
+        if os.path.exists(os.path.join(output_dir, rel)):
             continue
         try:
-            hf_hub_download(repo_id=REPO_ID, filename=rel, repo_type='dataset',
-                            local_dir=output_dir)
+            _download_one(rel, output_dir)
             n += 1
         except Exception as e:
             print(f'  [warn] {rel}: {type(e).__name__}: {str(e)[:150]}', file=sys.stderr)

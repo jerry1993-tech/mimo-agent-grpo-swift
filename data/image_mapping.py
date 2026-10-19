@@ -32,11 +32,33 @@ def mapping_path(raw_dir: str) -> str:
     return os.path.join(raw_dir, IMAGE_MAPPING_FILE)
 
 
+def _ms_download(rel: str, local_dir: str) -> str:
+    """ModelScope 数据集文件直链下载（国内快；repo 存在官方同步）。"""
+    import urllib.request
+    url = (f'https://modelscope.cn/api/v1/datasets/XiaomiMiMo/MiMo-V2.6-RL-oss/'
+           f'repo?Revision=master&FilePath={rel}')
+    dest = os.path.join(local_dir, os.path.basename(rel))
+    os.makedirs(local_dir, exist_ok=True)
+    tmp = dest + '.tmp'
+    urllib.request.urlretrieve(url, tmp)
+    os.replace(tmp, dest)
+    return dest
+
+
 def ensure_image_mapping(raw_dir: str = 'data/raw') -> str:
-    """确保 image-mapping.jsonl 在本地（已存在直接复用；缺失则从 HF 下载）。"""
+    """确保 image-mapping.jsonl 在本地（已存在直接复用；缺失则下载）。
+
+    下载通道：MS_CHANNEL=modelscope（默认，国内快）| hf（HF_ENDPOINT 镜像）。
+    """
     path = mapping_path(raw_dir)
     if os.path.exists(path):
         return path
+    channel = os.environ.get('MS_CHANNEL', 'modelscope')
+    if channel == 'modelscope':
+        try:
+            return _ms_download(IMAGE_MAPPING_FILE, raw_dir)
+        except Exception:
+            pass  # 退回 HF
     from huggingface_hub import hf_hub_download
     return hf_hub_download(
         repo_id='XiaomiMiMo/MiMo-V2.6-RL-oss',

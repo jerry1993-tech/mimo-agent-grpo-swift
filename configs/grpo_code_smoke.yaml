@@ -1,0 +1,68 @@
+# =====================================================================
+# GRPO - Code 域【smoke 验证版】：用于在小型沙箱服务器（2核4G）上
+# 验证「多轮沙箱 + 隐藏测试 verifier」完整训练闭环。
+#
+# 与 grpo_code.yaml 的差异（仅为适配小服务器并发上限）：
+#   per_device_train_batch_size 2 -> 1
+#   num_generations 8 -> 2          （1 prompt × 2 = 2 个并发环境）
+#   max_turns 20 -> 8               （缩短闭环时间）
+#   max_completion_length 2048 -> 1024
+#
+# 关键约束：沙箱服务器 SANDBOX_MAX_CONCURRENT_SESSIONS 必须
+#   >= per_device_train_batch_size × num_generations
+# 因为 GYMScheduler 会先并发创建整批环境再开始生成；
+# 并发上限更小会导致创建请求排队、训练卡在 on_trajectory_start。
+# =====================================================================
+
+rlhf_type: grpo
+model: /root/autodl-tmp/models/MiMo-V2.6-Distill-Qwen-9B
+model_type: qwen3_5
+template: qwen3_5
+dataset: data/outputs/grpo_code.jsonl
+
+multi_turn_scheduler: gym_scheduler
+gym_env: mimo_env
+use_gym_env: true
+max_turns: 8
+completion_length_limit_scope: per_round
+
+temperature: 1.0
+top_p: 0.95
+top_k: 20
+num_generations: 2
+max_completion_length: 1024
+
+use_vllm: true
+vllm_mode: colocate
+# Blackwell 95GB：vLLM KV cache 占 0.35（约 33GB），训练侧（18GB 权重 +
+# 激活/梯度）留 ~60GB；0.5 在第二个 micro-batch 会 OOM。
+vllm_gpu_memory_utilization: 0.35
+vllm_max_model_len: 32768
+vllm_enable_lora: true
+
+beta: 0.0
+scale_rewards: none
+epsilon: 0.2
+advantage_estimator: grpo
+
+tuner_type: lora
+lora_rank: 8
+lora_alpha: 32
+target_modules: all-linear
+lora_dropout: 0.05
+
+per_device_train_batch_size: 1
+# grad_accum 必须使 generation_batch_size = batch × grad_accum
+# 能被 num_generations 整除；且该值 = 每轮并发创建的环境数，
+# 必须 <= 沙箱服务器 SANDBOX_MAX_CONCURRENT_SESSIONS（这里 1×2=2）。
+gradient_accumulation_steps: 2
+learning_rate: 1.0e-6
+lr_scheduler_type: constant
+num_train_epochs: 1
+gradient_checkpointing: true
+max_length: 32768
+
+save_steps: 1000
+logging_steps: 1
+log_completions: true
+output_dir: runs/grpo_code_smoke_lora
