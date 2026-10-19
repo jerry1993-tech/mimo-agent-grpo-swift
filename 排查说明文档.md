@@ -121,7 +121,27 @@ sequenceDiagram
 
 ## 2. 与小米 VERL 的对齐
 
-| 环节 | 小米 `mimo-oss` | 本工程 | 状态 |
+### 2.1 生产 MixRL 与开源发布配方的区别
+
+- **小米生产训练采用 MixRL。** 论文 §5.1 / §6.2–6.3 显示：多个数据源按比例进入同一 prompt batch
+  （coding 68%、general tool use 12%、aesthetic design 13%、context following 3%、
+  cybersecurity 4%；1568 prompts × 16 rollouts = 25,088 trajectories/step）。生产日志
+  `https://mimo.xiaomi.com/rl/mimo-v26` 的 `dynsam/*` 指标显示 code / visual / general /
+  chat / cyber 在每一步同时贡献样本。各数据源占比由 **Sample Mixer** 维持（自适应并发、
+  deficit-corrected 调度、预测派发、sample replay）；Sample Mixer 属于生产基础设施，
+  **未随开源仓发布**。
+- **小米开源发布提供域级基线。** verl `mimo-oss` 的 recipes/scripts（论文 §7.2）按领域分别
+  独立训练 Code / Cyber / General / Visual / Music；开源仓不含 Sample Mixer / Data Scheduler
+  代码；开源仓内唯一的混合是 Code 域内 4 种 harness 的混合
+  （`config/agent/code/mix-four-whitebox.yaml`）。
+- **本工程复刻开源发布配方。** 本工程的分域配置（code / music / general）对应论文 §7.2 的
+  域级基线，不对应论文 §5–6 的生产 MixRL 系统。
+
+### 2.2 本工程与开源配方的对齐
+
+下表对照小米开源配方（verl `mimo-oss`）与本工程；生产 MixRL 的 Sample Mixer 不在对照范围内。
+
+| 环节 | 小米开源配方 `mimo-oss` | 本工程 | 状态 |
 |---|---|---|---|
 | 算法 / 优势 | `adv_estimator=grpo`，组内减均值不除 std | `grpo` + `scale_rewards: none` | ✅ |
 | KL / clip | 无 KL；clip 0.2 | `beta: 0.0`；`epsilon: 0.2` | ✅ |
@@ -182,6 +202,7 @@ mimo-agent-grpo-swift/
 ├── docs/INTERFACE.md           # 接口冻结规范
 ├── .env.example                # 环境变量样例（需手动 source）
 ├── requirements.txt
+├── LICENSE                      # Apache-2.0
 └── README.md
 ```
 
@@ -254,6 +275,12 @@ python -m data.prepare_grpo --domains code music --limit 20 \
 - `--backend docker|remote|local` 写入每行 env_config；远程部署用
   `--backend remote --sandbox-url http://<IP>:8100`。
 - 产物：`data/outputs/grpo_<domain>.jsonl`（含 `messages` 与完整 `env_config`）。
+- 合并文件：`data/outputs/grpo_train.jsonl` 是各域 jsonl 的静态拼接。每行
+  `env_config.domain` 仍可路由到对应 verifier 与沙箱后端，训练配置指向合并文件在技术上
+  可运行；但本工程未实现生产版 Sample Mixer（数据源目标占比、accept-rate/时长统计、
+  自适应并发与回放）。论文 §6.3 实测不同数据源的 rollout 时长相差 66×、生成 token 相差
+  90×；若缺少调度器，慢数据源会拖住整个 batch，导致吞吐与稳定性明显劣化。
+  本工程默认按域训练，合并文件仅用于数据检查或自定义实验。
 - 下载通道：`MS_CHANNEL=modelscope|hf`（默认 modelscope）。
 
 **镜像映射（关键）**：parquet 的 `docker_image` 是本地别名
@@ -509,3 +536,33 @@ python -m pytest -q            # 41 passed
   （ModelScope：https://modelscope.cn/models/XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B）
 - 任务镜像：https://hub.docker.com/r/xiaomimimo/mimo-v2.6-rl-oss
 - 本工程接口契约：`docs/INTERFACE.md`
+
+---
+
+## 11. 许可（License）
+
+本工程代码采用 **Apache-2.0**，见 [`LICENSE`](LICENSE)。
+
+第三方资产保留原许可：ms-swift / verl / 数据集 **Apache-2.0**；MiMo 模型 / mimoagent **MIT**；任务镜像按小米发布条款。
+
+---
+
+## 12. 引用（Citation）
+
+```bibtex
+@misc{mimo_agent_grpo_swift,
+  title  = {MiMo Agent GRPO on MS-Swift},
+  author = {{jerry1993-tech}},
+  year   = {2026},
+  url    = {https://github.com/jerry1993-tech/mimo-agent-grpo-swift}
+}
+
+@misc{mimo2026v26,
+  title  = {MiMo-V2.6: Scaling Reinforcement Learning Towards Self-Improvement},
+  author = {{Xiaomi MiMo Team}},
+  year   = {2026},
+  url    = {https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Pro-RL}
+}
+```
+
+上游工作链接见 §10。
