@@ -26,3 +26,6 @@ checkpoints/
 
 # Generated image lists
 *.list
+
+# ZCode tool artifact
+.zcodeignore
