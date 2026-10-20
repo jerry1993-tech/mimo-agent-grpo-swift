@@ -1,454 +1,444 @@
-# MiMo Agent GRPO on MS-Swift
+<h1 align="center">MiMo Agent GRPO on MS-Swift</h1>
 
-用 **MS-Swift** 的 GRPO 复刻小米 **MiMo-V2.6** 开源的交互式 Agent RL 训练流程：
-**多轮工具调用 + 外接沙箱 + 真实执行 verifier**，算法与超参逐项对齐
-[XiaomiMiMo/verl `mimo-oss`](https://github.com/XiaomiMiMo/verl) 分支。
+<p align="center">
+  <sub>MULTI-TURN TOOL USE&nbsp;·&nbsp;EXTERNAL SANDBOXES&nbsp;·&nbsp;REAL-EXECUTION VERIFIER&nbsp;·&nbsp;GRPO</sub>
+</p>
 
-| 资源 | 地址 |
+<p align="center">
+  <a href="https://github.com/modelscope/ms-swift"><img src="https://img.shields.io/badge/MS--Swift-v4.5.2-6f42c1?style=flat-square" alt="MS-Swift v4.5.2"></a>
+  <a href="https://huggingface.co/datasets/XiaomiMiMo/MiMo-V2.6-RL-oss"><img src="https://img.shields.io/badge/Dataset-7%2C780%20tasks-0969da?style=flat-square" alt="7,780 tasks"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-2ea44f?style=flat-square" alt="Apache-2.0"></a>
+  <a href="https://github.com/jerry1993-tech/mimo-agent-grpo-swift/stargazers"><img src="https://img.shields.io/github/stars/jerry1993-tech/mimo-agent-grpo-swift?style=flat-square&amp;label=Stars&amp;logo=github&amp;color=e3b341" alt="GitHub stars"></a>
+</p>
+
+<p align="center">
+  <b>English</b>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="README_zh.md">简体中文</a>
+</p>
+
+Reproduce Xiaomi **MiMo-V2.6**'s open-source interactive Agent RL training pipeline with **MS-Swift** GRPO:
+**multi-turn tool calling + external sandboxes + a real-execution verifier**, with the algorithm and
+hyperparameters aligned item by item with the
+[XiaomiMiMo/verl `mimo-oss`](https://github.com/XiaomiMiMo/verl) branch.
+
+| Resource | Link |
 |---|---|
-| 训练框架 | [modelscope/ms-swift](https://github.com/modelscope/ms-swift)（**v4.5.2**，已实测） |
-| 训练数据 | [XiaomiMiMo/MiMo-V2.6-RL-oss](https://huggingface.co/datasets/XiaomiMiMo/MiMo-V2.6-RL-oss)（Apache-2.0） |
-| 起点模型 | [MiMo-V2.6-Distill-Qwen-9B](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B) |
-| 任务镜像 | `xiaomimimo/mimo-v2.6-rl-oss`（Docker Hub，单仓多 tag） |
-| 原生流程 | [XiaomiMiMo/verl](https://github.com/XiaomiMiMo/verl/tree/mimo-oss) · [mimoagent](https://github.com/XiaomiMiMo/mimoagent) |
+| Training framework | [modelscope/ms-swift](https://github.com/modelscope/ms-swift) (**v4.5.2**, verified) |
+| Training data | [XiaomiMiMo/MiMo-V2.6-RL-oss](https://huggingface.co/datasets/XiaomiMiMo/MiMo-V2.6-RL-oss) (Apache-2.0) |
+| Starting model | [MiMo-V2.6-Distill-Qwen-9B](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B) |
+| Task images | `xiaomimimo/mimo-v2.6-rl-oss` (Docker Hub, multiple tags in one repository) |
+| Native pipeline | [XiaomiMiMo/verl](https://github.com/XiaomiMiMo/verl/tree/mimo-oss) · [mimoagent](https://github.com/XiaomiMiMo/mimoagent) |
 
 ---
 
-## 0. 关键事实
+## 0. Key facts
 
-1. **开源的是「任务环境池」，不是带轨迹的数据。** 5 个 parquet 共 **7,780 条任务**、仅约 20MB；
-   轨迹在训练时由 agent 在容器内多轮工具调用**动态产生**。仓库体积主要来自 4 万+ 环境文件。
-2. **小米只开源第二阶段 RL（GRPO），不含 IL/SFT。** RL 直接从蒸馏权重起步；本工程另外提供可选的
-   「成功轨迹 → SFT」等价 IL 路径（`data/collect_il_demo.py` + `data/prepare_sft.py`）。
-3. **沙箱是一任务一容器。** 命令经 `docker exec`（等价 `timeout N bash -lc`），文件走 tar，用完即毁；
-   镜像由数据的 `docker_image` 指定。本工程提供本机 Docker 与**外接 HTTP 沙箱服务**（GPU 实例 +
-   远程 CPU 服务器）两种形态。
+1. **What Xiaomi open-sourced is a "task environment pool", not data with trajectories.** The 5 parquet files hold **7,780 tasks** in only ~20MB; trajectories are **produced dynamically at training time** by the agent's multi-turn tool calls inside containers. The repository size comes mainly from 40k+ environment files.
+2. **Xiaomi open-sourced only stage-2 RL (GRPO), not IL/SFT.** RL starts directly from the distilled weights. This project additionally provides an optional, equivalent IL path — "successful trajectories → SFT" (`data/collect_il_demo.py` + `data/prepare_sft.py`).
+3. **The sandbox is one container per task.** Commands run through `docker exec` (equivalent to `timeout N bash -lc`), files are transferred via tar, and the container is destroyed after use; the image is specified by the data's `docker_image`. This project supports both local Docker and an **external HTTP sandbox service** (GPU instance + remote CPU server).
 
-| 领域 | 任务数 | verifier | 沙箱形态 |
+| Domain | Tasks | Verifier | Sandbox form |
 |---|---|---|---|
-| Code（SWE） | 2,698 | 隐藏测试，exit 0 → 1.0 | 每任务独立镜像（2~12GB/个） |
-| WebDev | 2,093 | 确定性检查 + 视觉评分钩子 | 1 个共享镜像 |
-| General | 989 | 官方 `run_verify.py`（rubric/judge） | 共享镜像 + MCP 工具 |
-| Cyber（ARVO） | 1,000 | sanitizer 崩溃规则，二值 | 每任务独立镜像 |
-| Music | 1,000 | ABC 记谱规则分 | **无沙箱** |
+| Code (SWE) | 2,698 | Hidden tests, exit 0 → 1.0 | Per-task image (2–12GB each) |
+| WebDev | 2,093 | Deterministic checks + visual scoring hook | 1 shared image |
+| General | 989 | Official `run_verify.py` (rubric/judge) | Shared image + MCP tools |
+| Cyber (ARVO) | 1,000 | Sanitizer crash rule, binary | Per-task image |
+| Music | 1,000 | ABC notation rule score | **No sandbox** |
 
 ---
 
-## 1. 架构与流程
+## 1. Architecture and workflow
 
-### 1.1 架构总览
+### 1.1 Architecture overview
 
 ```mermaid
 flowchart TB
-    subgraph Data["数据层"]
-        P["parquet ×5（任务环境池）"] --> PRE["data/prepare_grpo.py"]
+    subgraph Data["Data layer"]
+        P["parquet ×5 (task-environment pool)"] --> PRE["data/prepare_grpo.py"]
         PRE --> J["grpo_&lt;domain&gt;.jsonl<br/>messages + env_config"]
     end
 
-    subgraph Train["MS-Swift GRPO（LoRA + vLLM colocate）"]
-        ENTRY["train_entry.py<br/>注册 mimo_env / MiMoGymScheduler"] --> TRAINER["GRPO Trainer"]
+    subgraph Train["MS-Swift GRPO (LoRA + vLLM colocate)"]
+        ENTRY["train_entry.py<br/>registers mimo_env / MiMoGymScheduler"] --> TRAINER["GRPO Trainer"]
         TRAINER --> SCHED["GYMScheduler"]
-        SCHED --> ENV["MiMoAgentEnv（gym）"]
-        ENV <--> POL["vLLM 逐轮生成"]
-        TRAINER --> REW["total_reward → 组内优势"]
+        SCHED --> ENV["MiMoAgentEnv (gym)"]
+        ENV <--> POL["vLLM per-turn generation"]
+        TRAINER --> REW["total_reward → group-relative advantage"]
     end
 
-    subgraph Sandbox["沙箱（一任务一环境）"]
+    subgraph Sandbox["Sandbox (one environment per task)"]
         ENV -->|start / exec / file| BE["SandboxBackend"]
-        BE --> D["DockerBackend（本机，隔离）"]
-        BE --> R["RemoteBackend → HTTP 服务"]
-        BE --> L["LocalBackend（仅测试）"]
-        R --> SRV["sandbox/server.py<br/>per-task 容器"]
+        BE --> D["DockerBackend (local, isolated)"]
+        BE --> R["RemoteBackend → HTTP service"]
+        BE --> L["LocalBackend (tests only)"]
+        R --> SRV["sandbox/server.py<br/>per-task container"]
     end
 
-    subgraph Verify["真实执行打分（submit 后）"]
-        V["Verifier"] -->|"隐藏测试 / rubric / 规则"| BE
+    subgraph Verify["Real-execution scoring (after submit)"]
+        V["Verifier"] -->|"hidden tests / rubric / rules"| BE
         V -->|"outcome 0/1"| ENV
     end
 
     J --> TRAINER
 ```
 
-### 1.2 单轨迹时序（与小米一致）
+### 1.2 Single-trajectory timeline (same as Xiaomi)
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant T as GYMScheduler
     participant E as MiMoAgentEnv
-    participant B as Sandbox（Docker/Remote）
+    participant B as Sandbox (Docker/Remote)
     participant V as Verifier
 
     T->>E: reset(env_config)
-    E->>B: start（docker run / POST /sessions）
+    E->>B: start (docker run / POST /sessions)
     B-->>E: ready
     E-->>T: (problem, system_prompt)
 
-    loop 每轮（≤ max_turns）
-        T->>E: step(messages)（末条为 assistant）
-        E->>B: 解析 tool_call 后真实执行
+    loop Every turn (≤ max_turns)
+        T->>E: step(messages) (last message is assistant)
+        E->>B: parse tool_call, then execute for real
         B-->>E: observation
         E-->>T: (obs, reward=0, done=false)
-        T->>T: 以 user 角色回灌 observation
+        T->>T: feed the observation back as the user role
     end
 
-    alt assistant 调用 submit
-        T->>E: step（submit）
+    alt assistant calls submit
+        T->>E: step(submit)
         E->>V: verify()
-        V->>B: 注入 test_patch / 读产物 / 规则
-        B-->>V: 真实执行结果
+        V->>B: inject test_patch / read artifacts / apply rules
+        B-->>V: real execution result
         V-->>E: outcome score
-        E->>B: stop（docker rm -f / DELETE session）
+        E->>B: stop (docker rm -f / DELETE session)
         E-->>T: (obs, reward=score, done=true)
-    else max_turns 到顶
-        Note over T,E: swift 4.5.2 原生不关闭 env；<br/>MiMoGymScheduler 在最后一轮主动 close
+    else max_turns reached
+        Note over T,E: swift 4.5.2 does not close the env natively<br/>MiMoGymScheduler actively closes on the last turn
         T->>E: close()
         E->>B: stop
     end
 
-    Note over T,E: reward 仅在末步单点给出，累积为 total_reward
+    Note over T,E: reward is given only at the final step, accumulated into total_reward
 ```
 
-**多轮机制**：不是 KV 连续续写，而是每轮把上一轮 assistant(tool_call) 与 tool observation
-一起回灌 messages、重新 prefill 生成；中间步 reward=0，仅最终 `submit` 后由 verifier
-一次性给出 outcome（累加进 `total_reward`）。
+**Multi-turn mechanics**: generation does not continue from a persistent KV cache. Each turn feeds the previous turn's assistant(tool_call) and the tool observation back into `messages` and re-prefills to generate. Intermediate steps receive reward=0; only after the final `submit` does the verifier return the outcome in one shot (accumulated into `total_reward`).
 
-**工具协议**：MiMo 蒸馏模型原生输出 Qwen XML 格式
-（`<tool_call><function=bash><parameter=command>…</parameter></function></tool_call>`），
-`swift_agent/tool_parser.py` 同时兼容该格式与 JSON 格式。
+**Tool protocol**: the MiMo distilled model natively emits the Qwen XML format
+(`<tool_call><function=bash><parameter=command>…</parameter></function></tool_call>`);
+`swift_agent/tool_parser.py` accepts both this format and JSON.
 
 ---
 
-## 2. 与小米 VERL 的对齐
+## 2. Alignment with Xiaomi VERL
 
-### 2.1 生产 MixRL 与开源发布配方的区别
+### 2.1 Production MixRL vs. the open-source release recipe
 
-- **小米生产训练采用 MixRL。** 论文 §5.1 / §6.2–6.3 显示：多个数据源按比例进入同一 prompt batch
-  （coding 68%、general tool use 12%、aesthetic design 13%、context following 3%、
-  cybersecurity 4%；1568 prompts × 16 rollouts = 25,088 trajectories/step）。生产日志
-  `https://mimo.xiaomi.com/rl/mimo-v26` 的 `dynsam/*` 指标显示 code / visual / general /
-  chat / cyber 在每一步同时贡献样本。各数据源占比由 **Sample Mixer** 维持（自适应并发、
-  deficit-corrected 调度、预测派发、sample replay）；Sample Mixer 属于生产基础设施，
-  **未随开源仓发布**。
-- **小米开源发布提供域级基线。** verl `mimo-oss` 的 recipes/scripts（论文 §7.2）按领域分别
-  独立训练 Code / Cyber / General / Visual / Music；开源仓不含 Sample Mixer / Data Scheduler
-  代码；开源仓内唯一的混合是 Code 域内 4 种 harness 的混合
-  （`config/agent/code/mix-four-whitebox.yaml`）。
-- **本工程复刻开源发布配方。** 本工程的分域配置（code / music / general）对应论文 §7.2 的
-  域级基线，不对应论文 §5–6 的生产 MixRL 系统。
+- **Xiaomi's production training uses MixRL.** Paper §5.1 / §6.2–6.3 show that multiple data sources enter the same prompt batch in fixed proportions (coding 68%, general tool use 12%, aesthetic design 13%, context following 3%, cybersecurity 4%; 1568 prompts × 16 rollouts = 25,088 trajectories/step). The `dynsam/*` metrics in the production log `https://mimo.xiaomi.com/rl/mimo-v26` show code / visual / general / chat / cyber all contributing samples at every step. Each source's share is maintained by a **Sample Mixer** (adaptive concurrency, deficit-corrected scheduling, predictive dispatch, sample replay); the Sample Mixer is production infrastructure and **was not released with the open-source repository**.
+- **Xiaomi's open-source release provides domain-level baselines.** The recipes/scripts in verl `mimo-oss` (paper §7.2) train Code / Cyber / General / Visual / Music independently by domain; the open-source repository contains no Sample Mixer / Data Scheduler code; the only mixing in the open-source repository is the mixture of 4 harnesses within the Code domain (`config/agent/code/mix-four-whitebox.yaml`).
+- **This project reproduces the open-source release recipe.** This project's per-domain configs (code / music / general) correspond to the domain-level baselines of paper §7.2, not to the production MixRL system of paper §5–6.
 
-### 2.2 本工程与开源配方的对齐
+### 2.2 Alignment of this project with the open-source recipe
 
-下表对照小米开源配方（verl `mimo-oss`）与本工程；生产 MixRL 的 Sample Mixer 不在对照范围内。
+The table below compares Xiaomi's open-source recipe (verl `mimo-oss`) with this project; the production MixRL Sample Mixer is out of scope.
 
-| 环节 | 小米开源配方 `mimo-oss` | 本工程 | 状态 |
+| Component | Xiaomi open-source recipe `mimo-oss` | This project | Status |
 |---|---|---|---|
-| 算法 / 优势 | `adv_estimator=grpo`，组内减均值不除 std | `grpo` + `scale_rewards: none` | ✅ |
-| KL / clip | 无 KL；clip 0.2 | `beta: 0.0`；`epsilon: 0.2` | ✅ |
-| 采样 | temp 1.0 / top_p 0.95 / top_k 20 | 同 | ✅ |
-| 学习率 | 1e-6 constant | 同 | ✅ |
-| 分组过滤 | `filter_groups` 整组丢 | 全同 reward → 优势 0（等价零梯度） | ✅ 等价 |
-| 沙箱 | 一任务一 Pod，exec + tar | 一任务一容器，exec + tar；支持远程 HTTP 服务 | ✅ |
-| 镜像 | 每任务镜像 | `image-mapping.jsonl` 映射官方 tag，缺失自动 pull | ✅ |
-| 打分 | 阶段末真实执行 | verifier 在 `submit` 后真实执行（agent 期间无测试） | ✅ |
-| reward 位置 | 末位单点 outcome | 中间 0 + 末步 outcome | ✅ |
-| 基建失败 | `is_infra` 不记 0 分 | `is_infra=True`（组内剔除） | ✅ |
-| General | 双容器（main+sidecar）+ MCP | 单容器近似 + 官方 verify 优先 | ✅ 近似 |
-| Music / WebDev | 18 特征 / 组级视觉排序 | 规则子集 / 确定性检查 + 钩子 | ⚠️ 部分 |
-| 训练方式 | 全参 + Megatron/SGLang | **LoRA** + vLLM colocate | 🔁 等价替换 |
+| Algorithm / advantage | `adv_estimator=grpo`, subtract the group mean without dividing by std | `grpo` + `scale_rewards: none` | ✅ |
+| KL / clip | No KL; clip 0.2 | `beta: 0.0`; `epsilon: 0.2` | ✅ |
+| Sampling | temp 1.0 / top_p 0.95 / top_k 20 | Same | ✅ |
+| Learning rate | 1e-6 constant | Same | ✅ |
+| Group filtering | `filter_groups` drops whole groups | All-identical rewards → advantage 0 (equivalent to zero gradient) | ✅ Equivalent |
+| Sandbox | One Pod per task, exec + tar | One container per task, exec + tar; remote HTTP service supported | ✅ |
+| Images | Per-task image | `image-mapping.jsonl` maps official tags; automatic pull when missing | ✅ |
+| Scoring | Real execution at the end of the stage | Verifier executes for real after `submit` (no tests during the agent phase) | ✅ |
+| Reward placement | Single outcome at the final position | 0 for intermediate steps + outcome at the final step | ✅ |
+| Infrastructure failure | `is_infra` is not scored 0 | `is_infra=True` (removed from the group) | ✅ |
+| General | Dual containers (main + sidecar) + MCP | Single-container approximation + official verify preferred | ✅ Approximate |
+| Music / WebDev | 18 features / group-level visual ranking | Rule subset / deterministic checks + hook | ⚠️ Partial |
+| Training mode | Full-parameter + Megatron/SGLang | **LoRA** + vLLM colocate | 🔁 Equivalent substitution |
 
 ---
 
-## 3. 目录结构
+## 3. Project structure
 
 ```
 mimo-agent-grpo-swift/
-├── configs/                    # grpo_code / grpo_music / grpo_general / grpo_code_smoke / sft（yaml）
+├── configs/                    # grpo_code / grpo_music / grpo_general / grpo_code_smoke / sft (yaml)
 ├── data/
-│   ├── download_dataset.py     # 下载 5 个 parquet（默认 ModelScope，可切 HF）
-│   ├── image_mapping.py        # dataset_image -> dockerhub tag 映射（image-mapping.jsonl）
-│   ├── download_general_envs.py # 下载 general/envs/<task>/ 任务环境目录（925 个）
-│   ├── prepare_grpo.py         # parquet -> GRPO jsonl（messages + env_config）
-│   ├── gen_image_list.py       # grpo jsonl -> 镜像预拉取清单
-│   ├── prepare_sft.py          # rollout dump -> SFT jsonl（保留成功轨迹）
-│   └── collect_il_demo.py      # 可选：跑 agent 采集成功轨迹
+│   ├── download_dataset.py     # download the 5 parquet files (ModelScope by default, HF optional)
+│   ├── image_mapping.py        # dataset_image -> dockerhub tag mapping (image-mapping.jsonl)
+│   ├── download_general_envs.py # download general/envs/<task>/ task environment dirs (925)
+│   ├── prepare_grpo.py         # parquet -> GRPO jsonl (messages + env_config)
+│   ├── gen_image_list.py       # grpo jsonl -> image pre-pull list
+│   ├── prepare_sft.py          # rollout dump -> SFT jsonl (keep successful trajectories)
+│   └── collect_il_demo.py      # optional: run the agent to collect successful trajectories
 ├── sandbox/
-│   ├── base.py                 # SandboxBackend 抽象 + ExecResult + 后端工厂
-│   ├── docker_backend.py       # 一任务一容器（默认），镜像解析/自动 pull/任务级资源
-│   ├── local_backend.py        # 临时目录（无隔离，仅测试），容器路径映射模拟
-│   ├── remote_backend.py       # HTTP 客户端（鉴权/长超时/upload_dir）
-│   ├── server.py               # 外接 HTTP 沙箱服务（FastAPI，token/并发闸门/空闲回收）
-│   ├── general_env_setup.py    # general 域 env_task_dir 装配（manifest uploads / MCP / rubrics）
-│   ├── mcp_client.py           # general 域 MCP 工具客户端
+│   ├── base.py                 # SandboxBackend abstraction + ExecResult + backend factory
+│   ├── docker_backend.py       # one container per task (default), image resolution / auto-pull / task-level resources
+│   ├── local_backend.py        # temporary directory (no isolation, tests only), simulated container path mapping
+│   ├── remote_backend.py       # HTTP client (auth / long timeouts / upload_dir)
+│   ├── server.py               # external HTTP sandbox service (FastAPI, token / concurrency gate / idle reclamation)
+│   ├── general_env_setup.py    # general-domain env_task_dir assembly (manifest uploads / MCP / rubrics)
+│   ├── mcp_client.py           # general-domain MCP tool client
 │   └── Dockerfile / docker-compose.yml / docker-entrypoint.sh
 ├── verifier/
-│   ├── base.py                 # Verifier 抽象 + VerificationResult
-│   ├── code_verifier.py        # 隐藏测试二值（reset -> git apply -> test_command）
-│   ├── cyber_verifier.py       # sanitizer 崩溃规则
-│   ├── general_verifier.py     # 官方 run_verify.py 优先 + LLM rubric 兜底
-│   ├── webdev_verifier.py      # 渲染/视觉（含 grader 钩子）
-│   ├── music_verifier.py       # ABC 记谱规则
-│   └── llm_judge.py            # OpenAI 兼容判官
+│   ├── base.py                 # Verifier abstraction + VerificationResult
+│   ├── code_verifier.py        # binary hidden tests (reset -> git apply -> test_command)
+│   ├── cyber_verifier.py       # sanitizer crash rules
+│   ├── general_verifier.py     # official run_verify.py preferred + LLM rubric fallback
+│   ├── webdev_verifier.py      # rendering / visual (with grader hook)
+│   ├── music_verifier.py       # ABC notation rules
+│   └── llm_judge.py            # OpenAI-compatible judge
 ├── swift_agent/
-│   ├── spec.py                 # TaskSpec（parquet/env_config 互转）
-│   ├── tool_parser.py          # Qwen XML + JSON 双格式工具协议 + 系统提示
-│   ├── turn_executor.py        # 单轮工具执行 + finalize
-│   ├── agent_runner.py         # 独立 episode（IL 采集 / smoke）
-│   ├── mimo_env.py             # gym Env + MiMoGymScheduler（注册 mimo_env）★训练集成
-│   └── train_entry.py          # 训练入口（注册 env -> rlhf_main）
+│   ├── spec.py                 # TaskSpec (parquet/env_config conversion)
+│   ├── tool_parser.py          # Qwen XML + JSON dual-format tool protocol + system prompt
+│   ├── turn_executor.py        # single-turn tool execution + finalize
+│   ├── agent_runner.py         # standalone episode (IL collection / smoke)
+│   ├── mimo_env.py             # gym Env + MiMoGymScheduler (registers mimo_env) ★ training integration
+│   └── train_entry.py          # training entry point (register env -> rlhf_main)
 ├── scripts/                    # prepare_data / deploy_sandbox_server / prefetch_images /
 │                               # run_grpo / run_sft / start_sandbox / smoke_test
-├── tests/                      # 41 个测试（闭环 + 组件单测 + mock 样本）
-├── docs/INTERFACE.md           # 接口冻结规范
-├── .env.example                # 环境变量样例（需手动 source）
+├── tests/                      # 41 tests (end-to-end loop + component unit tests + mock samples)
+├── docs/INTERFACE.md           # frozen interface specification
+├── .env.example                # sample environment variables (must be sourced manually)
 ├── requirements.txt
 ├── LICENSE                      # Apache-2.0
-└── README.md
+├── README.md                    # English (default on GitHub)
+└── README_zh.md                 # Simplified Chinese
 ```
 
 ---
 
-## 4. 安装
+## 4. Installation
 
-要求：Python ≥ 3.10；GPU 训练需 CUDA 与 vLLM 匹配；沙箱服务器需 docker。
+Requirements: Python ≥ 3.10; GPU training needs a CUDA version compatible with vLLM; the sandbox server needs docker.
 
 ```bash
 conda create -n mimo-grpo python=3.11 -y && conda activate mimo-grpo
 
-# torch / vllm 请按本机 CUDA 版本安装（示例：cu130）
+# Install torch / vllm for your local CUDA version (example: cu130)
 pip install torch --index-url https://download.pytorch.org/whl/cu130
 pip install vllm
-pip install -r requirements.txt          # ms-swift>=4.5.2 等
+pip install -r requirements.txt          # ms-swift>=4.5.2, etc.
 
-python -c "import swift; print(swift.__version__)"   # 应 >= 4.5.2
+python -c "import swift; print(swift.__version__)"   # should be >= 4.5.2
 ```
 
-环境变量：`cp .env.example .env` 后按需填写。**`.env` 不会被自动加载**，使用前需注入：
+Environment variables: run `cp .env.example .env` and fill it in as needed. **`.env` is not loaded automatically**; inject it before use:
 
 ```bash
 set -a; source .env; set +a
 ```
 
-> 若 GPU 为 Blackwell（sm120），`run_grpo.sh` / `run_sft.sh` 已内置
-> `VLLM_USE_FLASHINFER_SAMPLER=0`（绕过 flashinfer 0.6.12 无 sm120 cubin 的缺陷）；
-> 直接 `python swift_agent/train_entry.py` 启动时需自行 export。
+> If your GPU is Blackwell (sm120), `run_grpo.sh` / `run_sft.sh` already include
+> `VLLM_USE_FLASHINFER_SAMPLER=0` (a workaround for flashinfer 0.6.12 having no sm120 cubin);
+> when launching directly with `python swift_agent/train_entry.py`, export it yourself.
 
 ---
 
-## 5. 模型与数据准备
+## 5. Model and data preparation
 
-### 5.1 下载模型（国内推荐 ModelScope）
+### 5.1 Download the model (ModelScope recommended in China)
 
 ```bash
-pip install modelscope                     # ms-swift 环境通常已自带
+pip install modelscope                     # usually already available in the ms-swift environment
 modelscope download --model XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B \
     --local_dir /root/autodl-tmp/models/MiMo-V2.6-Distill-Qwen-9B
 ```
 
-HF 备选：`export HF_ENDPOINT=https://hf-mirror.com && huggingface-cli download XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B --local-dir <同上>`（较慢）。
+HF alternative: `export HF_ENDPOINT=https://hf-mirror.com && huggingface-cli download XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B --local-dir <same as above>` (slower).
 
-**修改配置中的模型路径**：所有 `configs/*.yaml` 的 `model:` 当前为
-`/root/autodl-tmp/models/MiMo-V2.6-Distill-Qwen-9B`，与你的实际路径不一致时请批量替换：
+**Update the model path in the configs**: the `model:` field in every `configs/*.yaml` currently points to
+`/root/autodl-tmp/models/MiMo-V2.6-Distill-Qwen-9B`; if that does not match your actual path, replace it in bulk:
 
 ```bash
 sed -i 's#^model: .*#model: /your/path/MiMo-V2.6-Distill-Qwen-9B#' configs/*.yaml
 ```
 
-### 5.2 下载数据与镜像映射
+### 5.2 Download data and image mapping
 
 ```bash
-# 一键（默认全部域、docker 后端）
+# One-shot (all domains, docker backend by default)
 bash scripts/prepare_data.sh
-#   读取环境变量：SANDBOX_BACKEND（docker|remote|local）、SANDBOX_URL、
-#   JUDGE_BASE_URL / JUDGE_MODEL。例如远程沙箱：
+#   Reads env vars: SANDBOX_BACKEND (docker|remote|local), SANDBOX_URL,
+#   JUDGE_BASE_URL / JUDGE_MODEL. For example, with a remote sandbox:
 #   SANDBOX_BACKEND=remote SANDBOX_URL=http://<IP>:8100 bash scripts/prepare_data.sh code
 
-# 或分步
-python -m data.download_dataset --domains code music     # 默认 ModelScope 直链
-python -m data.download_dataset --channel hf --domains code   # 改走 HF/HF-mirror
-python -m data.image_mapping                             # image-mapping.jsonl（3764 条）
+# Or step by step
+python -m data.download_dataset --domains code music     # ModelScope direct links by default
+python -m data.download_dataset --channel hf --domains code   # switch to HF/HF-mirror
+python -m data.image_mapping                             # image-mapping.jsonl (3764 entries)
 python -m data.prepare_grpo --domains code music --limit 20 \
     --backend docker --output-path data/outputs/grpo_train.jsonl
 ```
 
-- `--limit N`：每域随机取样 N 条（`--seed` 控制），适合先跑通再扩量。
-- `--backend docker|remote|local` 写入每行 env_config；远程部署用
-  `--backend remote --sandbox-url http://<IP>:8100`。
-- 产物：`data/outputs/grpo_<domain>.jsonl`（含 `messages` 与完整 `env_config`）。
-- 合并文件：`data/outputs/grpo_train.jsonl` 是各域 jsonl 的静态拼接。每行
-  `env_config.domain` 仍可路由到对应 verifier 与沙箱后端，训练配置指向合并文件在技术上
-  可运行；但本工程未实现生产版 Sample Mixer（数据源目标占比、accept-rate/时长统计、
-  自适应并发与回放）。论文 §6.3 实测不同数据源的 rollout 时长相差 66×、生成 token 相差
-  90×；若缺少调度器，慢数据源会拖住整个 batch，导致吞吐与稳定性明显劣化。
-  本工程默认按域训练，合并文件仅用于数据检查或自定义实验。
-- 下载通道：`MS_CHANNEL=modelscope|hf`（默认 modelscope）。
+- `--limit N`: randomly sample N tasks per domain (`--seed` controls the selection); useful for getting the pipeline working before scaling up.
+- `--backend docker|remote|local` is written into each row's `env_config`; for remote deployment use `--backend remote --sandbox-url http://<IP>:8100`.
+- Output: `data/outputs/grpo_<domain>.jsonl` (with `messages` and the full `env_config`).
+- Merged file: `data/outputs/grpo_train.jsonl` is a static concatenation of the per-domain jsonl files. Each row's `env_config.domain` still routes it to the matching verifier and sandbox backend, so a training config pointing at the merged file is technically runnable. However, this project does not implement the production Sample Mixer (target source proportions, accept-rate/duration statistics, adaptive concurrency and replay). Paper §6.3 measured a 66× spread in rollout duration and a 90× spread in generated tokens between data sources; without the scheduler, slow sources hold up the whole batch and significantly degrade throughput and stability. This project trains per domain by default; the merged file is intended only for data inspection or custom experiments.
+- Download channel: `MS_CHANNEL=modelscope|hf` (default modelscope).
 
-**镜像映射（关键）**：parquet 的 `docker_image` 是本地别名
-（如 `format-code-task-001457:latest`），真实镜像为
-`docker.io/xiaomimimo/mimo-v2.6-rl-oss:format-code-task-001457`（**tag 名不同**）。
-`prepare_grpo` 按映射表写入 `env_config.dockerhub_image`，运行时优先使用并自动 pull。
+**Image mapping (critical)**: the parquet `docker_image` is a local alias
+(e.g. `format-code-task-001457:latest`), while the real image is
+`docker.io/xiaomimimo/mimo-v2.6-rl-oss:format-code-task-001457` (**the tag name differs**).
+`prepare_grpo` writes `env_config.dockerhub_image` from the mapping table; at runtime it is
+preferred and pulled automatically when missing.
 
-**general 域**需额外下载任务环境目录（rubric / MCP 工具 / workspace 文件）：
+**general domain** additionally needs the task environment directories (rubric / MCP tools / workspace files):
 
 ```bash
-python -m data.download_general_envs                       # 全量 925 个（体积大）
+python -m data.download_general_envs                       # all 925 (large)
 python -m data.download_general_envs \
-    --from-jsonl data/outputs/grpo_general.jsonl --limit 50 # 仅取样任务
+    --from-jsonl data/outputs/grpo_general.jsonl --limit 50 # sampled tasks only
 python -m data.download_general_envs --tasks s3k_0000_accounting_audit_tax_en_t1_rl_008
 ```
 
-未下载 env_task_dir 的行会被 `prepare_grpo` 跳过并打印统计。
+Rows whose `env_task_dir` has not been downloaded are skipped by `prepare_grpo`, which prints statistics.
 
 ---
 
-## 6. 沙箱
+## 6. Sandbox
 
-### 6.1 本机 Docker
+### 6.1 Local Docker
 
-训练进程直接 `docker run` 每任务容器（`--rm`、默认 `--network=none`、
-`--memory/--cpus/--pids-limit`、容器内 TTL 自毁），无需常驻服务。
+The training process directly `docker run`s a container per task (`--rm`, `--network=none` by default,
+`--memory/--cpus/--pids-limit`, in-container TTL self-destruct); no long-running service is needed.
 
 ```bash
-docker version    # 确认 daemon 可用
+docker version    # confirm the daemon is available
 ```
 
-镜像本地缺失时自动 pull（`SANDBOX_DOCKER_PULL_TIMEOUT`，默认 1800s，
-断流自动重试 `SANDBOX_DOCKER_PULL_RETRIES=2`）。general 域 parquet 携带的
-`cpus/memory_mb` 会覆盖容器默认资源。
+Images are pulled automatically when missing locally (`SANDBOX_DOCKER_PULL_TIMEOUT`, default 1800s;
+retries on interrupted streams via `SANDBOX_DOCKER_PULL_RETRIES=2`). The `cpus/memory_mb` values carried
+by general-domain parquet override the default container resources.
 
-### 6.2 外接 HTTP 沙箱（GPU 实例 + 远程 CPU 服务器）★推荐
+### 6.2 External HTTP sandbox (GPU instance + remote CPU server) ★ Recommended
 
-适用于 AutoDL 等**无法 docker-in-docker** 的 GPU 实例：GPU 侧只跑训练与 vLLM 生成，
-所有容器在远程服务器的 docker 中执行，二者经 HTTP 通信。
+Suitable for GPU instances such as AutoDL that **cannot use docker-in-docker**: the GPU side runs only
+training and vLLM generation, while all containers execute in docker on the remote server, and the two
+communicate over HTTP.
 
 ```mermaid
 flowchart LR
-    subgraph GPU["GPU 实例（训练机）"]
+    subgraph GPU["GPU instance (training machine)"]
         T["ms-swift GRPO<br/>vLLM colocate"] --> E["MiMoAgentEnv"]
         E --> RB["RemoteBackend"]
         E --> V["Verifier"]
     end
-    subgraph SRV["CPU 服务器（docker + systemd）"]
-        API["sandbox/server.py<br/>FastAPI + token 鉴权"]
-        C1["per-task 容器 A"]
-        C2["per-task 容器 B"]
+    subgraph SRV["CPU server (docker + systemd)"]
+        API["sandbox/server.py<br/>FastAPI + token auth"]
+        C1["per-task container A"]
+        C2["per-task container B"]
         API --> C1
         API --> C2
     end
     RB -->|"HTTP / X-Sandbox-Token"| API
-    V -->|"exec / 读 reward.json"| API
+    V -->|"exec / read reward.json"| API
 ```
 
-> 每轮工具调用、镜像拉取、容器执行与最终打分全部经 HTTP 落到服务器侧；
-> GPU 侧不接触 docker。
+> Every tool call, image pull, container execution and final scoring goes over HTTP to the server side;
+> the GPU side never touches docker.
 
-**服务器侧**（已装 docker，clone 本工程）：
+**Server side** (docker installed, clone this project):
 
 ```bash
 bash scripts/deploy_sandbox_server.sh
-# 自动完成：轻量 venv（无 torch）→ /etc/mimo-sandbox.env（随机 token）→
-# systemd 服务（自启/崩溃拉起）→ 健康检查；输出 SANDBOX_TOKEN。
-# 可选环境变量：SANDBOX_PORT=8100 MAX_SESSIONS=2 SANDBOX_TOKEN=xxx
-#               DOCKER_MIRRORS="https://<id>.mirror.aliyuncs.com"
+# Automatically: lightweight venv (no torch) -> /etc/mimo-sandbox.env (random token) ->
+# systemd service (auto-start / restart on crash) -> health check; prints SANDBOX_TOKEN.
+# Optional env vars: SANDBOX_PORT=8100 MAX_SESSIONS=2 SANDBOX_TOKEN=xxx
+#                    DOCKER_MIRRORS="https://<id>.mirror.aliyuncs.com"
 ```
 
-- **安全组**：放行服务端口 TCP（默认 8100），建议仅白名单 GPU 实例出口 IP。
-- **镜像加速**：公共加速器对 `xiaomimimo` 仓不可靠（白名单拒绝/层损坏）。实测
-  `docker.1panel.live` 可用；阿里云 ECS 建议用控制台「容器镜像服务 → 镜像加速器」的专属地址。
-- **并发上限**：`SANDBOX_MAX_CONCURRENT_SESSIONS` 必须 **≥ 训练每批并发环境数 =
-  `per_device_train_batch_size × gradient_accumulation_steps`**（且该值需能被
-  `num_generations` 整除）。GYMScheduler 会先并发创建整批环境再开始生成，上限不足会
-  卡在 `on_trajectory_start`。**2核4G 实测建议 2**。
+- **Security group**: allow the service port over TCP (default 8100); whitelisting only the GPU instance's egress IP is recommended.
+- **Image acceleration**: public accelerators are unreliable for the `xiaomimimo` repository (whitelist rejections / corrupted layers). `docker.1panel.live` was verified to work; on Alibaba Cloud ECS, use the dedicated address from the console's "Container Registry → Image Accelerator".
+- **Concurrency cap**: `SANDBOX_MAX_CONCURRENT_SESSIONS` must be **≥ the number of concurrent environments per training batch = `per_device_train_batch_size × gradient_accumulation_steps`** (and that value must be divisible by `num_generations`). GYMScheduler creates the entire batch of environments concurrently before generation begins; if the cap is too low, training hangs at `on_trajectory_start`. **Verified recommendation for 2 vCPU / 4GB: 2**.
 
-**GPU 侧**：
+**GPU side**:
 
 ```bash
-export SANDBOX_URL=http://<服务器IP>:8100
-export SANDBOX_TOKEN=<部署输出的 token>
+export SANDBOX_URL=http://<server-ip>:8100
+export SANDBOX_TOKEN=<token printed by the deployment>
 
 python -m data.prepare_grpo --domains code --limit 20 \
     --backend remote --sandbox-url $SANDBOX_URL
 bash scripts/run_grpo.sh code
 ```
 
-**镜像预拉取**（强烈建议：code 镜像 2~12GB，会话内同步 pull 极慢且占磁盘）：
+**Image pre-pull** (strongly recommended: code images are 2–12GB each, and pulling them synchronously
+within a session is extremely slow and consumes disk):
 
 ```bash
-# GPU 实例：按取样数据生成清单并传给服务器
+# GPU instance: generate a list from the sampled data and send it to the server
 python -m data.gen_image_list data/outputs/grpo_code.jsonl -o code20.list
 scp code20.list user@<server>:~/
 
-# 服务器：并发 2、失败重试 3 次、断点续传
-bash scripts/prefetch_images.sh ~/code20.list      # PARALLEL=2 RETRY=3 可调
-df -h / && sudo docker system df                   # 注意磁盘余量
+# Server: concurrency 2, 3 retries, resumable
+bash scripts/prefetch_images.sh ~/code20.list      # PARALLEL=2 RETRY=3 adjustable
+df -h / && sudo docker system df                   # watch the disk headroom
 ```
 
-其他要点：
+Other points:
 
-- **鉴权**：服务器设 `SANDBOX_TOKEN` 后所有业务端点校验 `X-Sandbox-Token`；
-  token 仅经环境变量传递，不写入训练数据。`GET /healthz` 免鉴权。
-- **会话回收**：swift 4.5.2 在轨迹 `max_turns` 到顶时不调用 `env.close()`。本工程用
-  `MiMoGymScheduler` 在最后一轮主动关闭；服务器另有 `SANDBOX_SESSION_IDLE_TTL`
-  （默认 900s）空闲回收与 `SANDBOX_CREATE_WAIT`（默认 600s）有界排队兜底。
-- **端点**：`/sessions`、`/sessions/{id}/exec`、`/files`、`/upload_dir`、
-  `DELETE /sessions/{id}`（OpenAPI 见服务端 `/docs`）。general 域 env_task_dir
-  由 GPU 侧打包经 `/upload_dir` 传入容器。
+- **Authentication**: once `SANDBOX_TOKEN` is set on the server, all business endpoints validate `X-Sandbox-Token`; the token is passed only through environment variables and never written into training data. `GET /healthz` is unauthenticated.
+- **Session reclamation**: swift 4.5.2 does not call `env.close()` when a trajectory reaches `max_turns`. This project uses `MiMoGymScheduler` to close actively on the last turn; the server additionally has `SANDBOX_SESSION_IDLE_TTL` (default 900s) idle reclamation and `SANDBOX_CREATE_WAIT` (default 600s) bounded queueing as fallbacks.
+- **Endpoints**: `/sessions`, `/sessions/{id}/exec`, `/files`, `/upload_dir`, `DELETE /sessions/{id}` (OpenAPI at the server's `/docs`). For the general domain, `env_task_dir` is packaged on the GPU side and passed into the container via `/upload_dir`.
 
-### 6.3 Local（无隔离，仅测试）
+### 6.3 Local (no isolation, tests only)
 
-`--backend local` 在临时目录直接执行命令，含路径穿越防护与 atexit 清理，
-**严禁用于不可信模型或生产**。
+`--backend local` executes commands directly in a temporary directory, with path-traversal protection
+and atexit cleanup. **Never use it with untrusted models or in production.**
 
 ---
 
-## 7. 训练
+## 7. Training
 
-### 7.1 GRPO（LoRA，主路径）
+### 7.1 GRPO (LoRA, main path)
 
-所有配置统一 LoRA：`tuner_type: lora, lora_rank: 8, lora_alpha: 32,
-target_modules: all-linear, lora_dropout: 0.05`；GRPO 学习率沿用小米 1e-6 constant。
-`model_type: qwen3_5` 与 `template: qwen3_5` 为**必填消歧项**（否则 swift 自动匹配会撞车）。
+All configs use LoRA uniformly: `tuner_type: lora, lora_rank: 8, lora_alpha: 32,
+target_modules: all-linear, lora_dropout: 0.05`; the GRPO learning rate follows Xiaomi's 1e-6
+constant. `model_type: qwen3_5` and `template: qwen3_5` are **required to disambiguate** (otherwise
+swift's automatic matching conflicts).
 
 ```bash
-# 单卡
+# Single GPU
 bash scripts/run_grpo.sh code
-# 多卡（torchrun）
+# Multi-GPU (torchrun)
 NPROC_PER_NODE=8 bash scripts/run_grpo.sh code
 
-# 小服务器 / 远程沙箱冒烟（batch1 × grad2 × N2）
+# Smoke test on a small server / with a remote sandbox (batch1 × grad2 × N2)
 bash scripts/run_grpo.sh code_smoke
 
-# 其它域
-bash scripts/run_grpo.sh music      # 无沙箱，最快验证闭环
-bash scripts/run_grpo.sh general    # 需 JUDGE_*（或官方 verify 容器内可用）
+# Other domains
+bash scripts/run_grpo.sh music      # no sandbox, fastest end-to-end validation
+bash scripts/run_grpo.sh general    # requires JUDGE_* (or official verify available in the container)
 ```
 
-等价直接命令：`python swift_agent/train_entry.py configs/grpo_code.yaml`
-（`train_entry` 先注册 mimo_env / MiMoGymScheduler，再进入 `rlhf_main`）。
+Equivalent direct command: `python swift_agent/train_entry.py configs/grpo_code.yaml`
+(`train_entry` first registers `mimo_env` / `MiMoGymScheduler`, then enters `rlhf_main`).
 
-关键参数（`configs/grpo_code.yaml` 可调）：
+Key parameters (adjustable in `configs/grpo_code.yaml`):
 
-| 参数 | 说明 |
+| Parameter | Description |
 |---|---|
-| `num_generations` | 组大小（小米生产 16；单卡建议 8，小服务器 2） |
-| `max_turns` | 单轨迹最大轮次（code 默认 20；冒烟 8） |
-| `vllm_gpu_memory_utilization` | colocate 显存占比（95GB 卡可用 0.35~0.5） |
-| `vllm_enable_lora` | **LoRA 训练必须 true**（否则 rollout 用基础权重，off-policy） |
-| `per_device_train_batch_size × gradient_accumulation_steps` | = 每批并发环境数，须 ≤ 沙箱并发上限 |
-| `max_completion_length` / `max_length` | 单轮生成长度 / 总上下文 |
+| `num_generations` | Group size (Xiaomi production 16; 8 recommended on a single GPU, 2 on a small server) |
+| `max_turns` | Maximum turns per trajectory (code default 20; smoke 8) |
+| `vllm_gpu_memory_utilization` | Colocate memory fraction (0.35–0.5 usable on a 95GB card) |
+| `vllm_enable_lora` | **Must be true for LoRA training** (otherwise rollout uses the base weights, off-policy) |
+| `per_device_train_batch_size × gradient_accumulation_steps` | = concurrent environments per batch, must be ≤ the sandbox concurrency cap |
+| `max_completion_length` / `max_length` | Generation length per turn / total context |
 
-产物：`runs/grpo_<domain>_lora/v<N>-<timestamp>/`，含 LoRA adapter、`args.json`、
-`logging.jsonl`、`completions.jsonl`。合并权重导出：
+Artifacts: `runs/grpo_<domain>_lora/v<N>-<timestamp>/`, containing the LoRA adapter, `args.json`,
+`logging.jsonl`, and `completions.jsonl`. Export merged weights:
 
 ```bash
 swift export --adapters runs/grpo_code_lora/v<N>-*/checkpoint-<step> \
     --merge_lora true --output_dir runs/merged
 ```
 
-### 7.2 可选：IL/SFT 预热
+### 7.2 Optional: IL/SFT warm-up
 
 ```bash
-# 1) 用 OpenAI 兼容 policy 在沙箱采集轨迹（成功/失败均记录）
+# 1) Collect trajectories in the sandbox with an OpenAI-compatible policy (both successes and failures are recorded)
 python -m data.collect_il_demo \
     --input data/outputs/grpo_code.jsonl \
     --output data/outputs/rollout_dump.jsonl \
@@ -456,98 +446,95 @@ python -m data.collect_il_demo \
     --policy-base-url $OPENAI_BASE_URL --policy-api-key $OPENAI_API_KEY \
     --policy-model $MODEL_NAME
 
-# 2) 仅保留 reward==1 的轨迹 -> SFT 数据
+# 2) Keep only reward==1 trajectories -> SFT data
 python -m data.prepare_sft --input data/outputs/rollout_dump.jsonl \
     --reward-threshold 1.0 --output data/outputs/sft.jsonl
 
-# 3) SFT（configs/sft.yaml 同为 LoRA）
+# 3) SFT (configs/sft.yaml is also LoRA)
 bash scripts/run_sft.sh
 ```
 
-之后把 GRPO 配置的 `model:` 改为 SFT 产出的 checkpoint 再训练。
+Afterwards, point the GRPO config's `model:` at the checkpoint produced by SFT and train again.
 
 ---
 
-## 8. 自测与验证
+## 8. Self-test and validation
 
 ```bash
-bash scripts/smoke_test.sh     # py_compile 全量 + pytest
-# 或
+bash scripts/smoke_test.sh     # full py_compile + pytest
+# or
 python -m py_compile $(find . -name "*.py")
 python -m pytest -q            # 41 passed
 ```
 
-**已实测**（2026-10-18，单卡 RTX PRO 6000 96GB + 阿里云 2核4G 沙箱服务器）：
+**Verified** (2026-10-18, single RTX PRO 6000 96GB + Alibaba Cloud 2 vCPU / 4GB sandbox server):
 
-- ✅ `prepare_grpo` 全量 7,780 行跑通（6,855 行产出，general 925 行按设计跳过），
-  `dockerhub_image` 注入率 100%；`image-mapping.jsonl` 3,764 条映射正确。
-- ✅ music 域 GRPO+LoRA 完整闭环：4/4 steps，reward=0.85，loss/grad 正常。
-- ✅ code 域多轮沙箱闭环：`grpo_code_smoke` 2/2 steps（~42s/step），真实容器
-  exec、checkpoint 落盘、会话零泄漏；模型按原生 XML 格式操作容器。
-- ✅ general 域真实任务装配：27 文件上传、6 条 rubric、4 个 MCP server 注入。
-- ✅ 远程沙箱全链路：鉴权、exec、文件读写、`upload_dir`、并发闸门、空闲回收。
+- ✅ `prepare_grpo` processed all 7,780 rows (6,855 rows produced, 925 general rows skipped by design), `dockerhub_image` injection rate 100%; `image-mapping.jsonl` 3,764 mappings correct.
+- ✅ Music-domain GRPO+LoRA full loop: 4/4 steps, reward=0.85, loss/grad normal.
+- ✅ Code-domain multi-turn sandbox loop: `grpo_code_smoke` 2/2 steps (~42s/step), real container exec, checkpoint persisted, zero session leaks; the model operates the container in the native XML format.
+- ✅ General-domain real-task assembly: 27 files uploaded, 6 rubrics, 4 MCP servers injected.
+- ✅ Remote sandbox full chain: authentication, exec, file read/write, `upload_dir`, concurrency gate, idle reclamation.
 
-**未验证/已知限制（如实说明）**：
+**Not verified / known limitations (stated candidly)**:
 
-- ❌ 未跑长程/多卡训练，未验证收敛效果；smoke 只证明闭环正确。
-- ⚠️ general 官方 `run_verify.py` 与 MCP 依赖镜像内环境，仅 docker/remote 可用；
-  local 后端降级为 LLM judge。
-- ⚠️ code 镜像 2~12GB/个，小磁盘服务器只能缓存少量任务；大规模训练需扩容磁盘。
+- ❌ No long-horizon or multi-GPU training was run, and convergence has not been validated; the smoke test only proves the loop is correct.
+- ⚠️ The general official `run_verify.py` and MCP depend on the in-image environment and are available only with docker/remote; the local backend degrades to LLM judge.
+- ⚠️ Code images are 2–12GB each; small-disk servers can cache only a handful of tasks; large-scale training requires disk expansion.
 
 ---
 
-## 9. 故障排查
+## 9. Troubleshooting
 
-| 现象 | 原因与处理 |
+| Symptom | Cause and resolution |
 |---|---|
-| `FlashInfer requires GPUs with sm75 or higher` / `SM 12.x requires CUDA >= 12.9` | Blackwell(sm120) 上 flashinfer 0.6.12 无 sm120 cubin。`export VLLM_USE_FLASHINFER_SAMPLER=0`（脚本已内置）。 |
-| `docker pull failed`（超时/断流/`magic number mismatch`） | 加速器不可靠。配置阿里云专属加速器或 `docker.1panel.live`；预拉取 `scripts/prefetch_images.sh`。 |
-| 训练停在 `Train 0/N`、沙箱 `sessions` 不增长 | ①镜像在 cold pull（看服务器 `docker pull`）；②并发上限 < batch×grad_accum（看线程栈卡在 `on_trajectory_start`）。 |
-| CUDA OOM（第二个 micro-batch） | 降低 `vllm_gpu_memory_utilization`（0.5→0.35）、`max_length` 或 batch。 |
-| `generation_batch_size (N) must be evenly divisible by num_generations` | 令 `per_device_train_batch_size × gradient_accumulation_steps` 能被 `num_generations` 整除。 |
-| 模型一直不调用工具 | 检查输出是否为 Qwen XML 格式（已支持）；确认系统提示未被覆盖；`step` 会回灌纠错提示。 |
-| `env_task_dir not found locally` | `python -m data.download_general_envs --tasks <id>`（或 `--from-jsonl`）。 |
-| General 直接 `is_infra` | 未配置 judge：设 `JUDGE_BASE_URL/JUDGE_API_KEY/JUDGE_MODEL`；或官方 verify 不可用。 |
-| code 任务大量 `is_infra` | 镜像内需为 git 仓库且 `test_patch` 可 `git apply`；检查 `test_command` 绝对路径。 |
-| `No module named swift` | `pip install "ms-swift>=4.5.2"`。 |
-| 容器残留 | 已内置 `--rm` + TTL；`docker ps -q --filter name=mimo- \| xargs -r docker rm -f`。 |
-| 下载慢 | HF 设 `HF_ENDPOINT=https://hf-mirror.com`；模型/数据优先 ModelScope。 |
+| `FlashInfer requires GPUs with sm75 or higher` / `SM 12.x requires CUDA >= 12.9` | flashinfer 0.6.12 has no sm120 cubin on Blackwell (sm120). `export VLLM_USE_FLASHINFER_SAMPLER=0` (already built into the scripts). |
+| `docker pull failed` (timeout / interrupted stream / `magic number mismatch`) | Unreliable accelerator. Configure a dedicated Alibaba Cloud accelerator or `docker.1panel.live`; pre-pull with `scripts/prefetch_images.sh`. |
+| Training stuck at `Train 0/N`, sandbox `sessions` not growing | ① Images are cold-pulling (watch `docker pull` on the server); ② concurrency cap < batch × grad_accum (thread stacks stuck in `on_trajectory_start`). |
+| CUDA OOM (second micro-batch) | Lower `vllm_gpu_memory_utilization` (0.5→0.35), `max_length`, or the batch size. |
+| `generation_batch_size (N) must be evenly divisible by num_generations` | Make `per_device_train_batch_size × gradient_accumulation_steps` divisible by `num_generations`. |
+| Model never calls tools | Check whether the output is in Qwen XML format (supported); confirm the system prompt is not overridden; `step` feeds back corrective prompts. |
+| `env_task_dir not found locally` | `python -m data.download_general_envs --tasks <id>` (or `--from-jsonl`). |
+| General goes straight to `is_infra` | Judge not configured: set `JUDGE_BASE_URL/JUDGE_API_KEY/JUDGE_MODEL`; or official verify is unavailable. |
+| Many code tasks hit `is_infra` | The image must contain a git repository and `test_patch` must apply with `git apply`; check the absolute paths in `test_command`. |
+| `No module named swift` | `pip install "ms-swift>=4.5.2"`. |
+| Residual containers | `--rm` + TTL are built in; `docker ps -q --filter name=mimo- \| xargs -r docker rm -f`. |
+| Slow downloads | For HF set `HF_ENDPOINT=https://hf-mirror.com`; prefer ModelScope for models/data. |
 
 ---
 
-## 10. 参考来源（可追溯）
+## 10. References (traceable)
 
-- MS-Swift：https://github.com/modelscope/ms-swift（tag `v4.5.2`，已实测）
-  - GRPO 参数：`swift/arguments/rlhf_args.py`、`swift/rlhf_trainers/args_mixin.py`
-  - gym 沙箱：`swift/rollout/gym_env.py`、`swift/rollout/multi_turn.py`、`swift/rollout/agent_loop.py`
-  - reward 调用：`swift/rl_core/grpo_algorithm.py`、`swift/rewards/orm.py`
-  - LoRA / vLLM 同步：`swift/tuners/base.py`、`swift/rlhf_trainers/{rollout_mixin,vllm_client}.py`
-- 小米 VERL：https://github.com/XiaomiMiMo/verl（branch `mimo-oss`）
-  - Code 主配置 `recipes/code/config/train.yaml`；Code runner `recipes/code/mimoagent_runner.py`
-  - General `recipes/general/agent_loop.py`、`recipes/general/env_actor.py`
-  - ARVO `recipes/arvo/agent_loop.py`；塑形 `verl/trainer/ppo/arvo_penalties.py`
-- 小米 harness（mimoagent）：https://github.com/XiaomiMiMo/mimoagent（branch `mimo-oss`）
-  - Code 打分 `src/mimoagent/environments/datasets/opensource_code.py`
-  - rubric judge `src/mimoagent/environments/rubric_judge.py`
-  - docker/k8s 后端 `src/mimoagent/environments/docker.py` / `kubernetes.py`
-- 数据集：https://huggingface.co/datasets/XiaomiMiMo/MiMo-V2.6-RL-oss
-  （ModelScope 官方同步仓：https://modelscope.cn/datasets/XiaomiMiMo/MiMo-V2.6-RL-oss）
-- 起点模型：https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B
-  （ModelScope：https://modelscope.cn/models/XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B）
-- 任务镜像：https://hub.docker.com/r/xiaomimimo/mimo-v2.6-rl-oss
-- 本工程接口契约：`docs/INTERFACE.md`
-
----
-
-## 11. 许可（License）
-
-本工程代码采用 **Apache-2.0**，见 [`LICENSE`](LICENSE)。
-
-第三方资产保留原许可：ms-swift / verl / 数据集 **Apache-2.0**；MiMo 模型 / mimoagent **MIT**；任务镜像按小米发布条款。
+- MS-Swift: https://github.com/modelscope/ms-swift (tag `v4.5.2`, verified)
+  - GRPO parameters: `swift/arguments/rlhf_args.py`, `swift/rlhf_trainers/args_mixin.py`
+  - Gym sandbox: `swift/rollout/gym_env.py`, `swift/rollout/multi_turn.py`, `swift/rollout/agent_loop.py`
+  - Reward calls: `swift/rl_core/grpo_algorithm.py`, `swift/rewards/orm.py`
+  - LoRA / vLLM sync: `swift/tuners/base.py`, `swift/rlhf_trainers/{rollout_mixin,vllm_client}.py`
+- Xiaomi VERL: https://github.com/XiaomiMiMo/verl (branch `mimo-oss`)
+  - Code main config `recipes/code/config/train.yaml`; Code runner `recipes/code/mimoagent_runner.py`
+  - General `recipes/general/agent_loop.py`, `recipes/general/env_actor.py`
+  - ARVO `recipes/arvo/agent_loop.py`; shaping `verl/trainer/ppo/arvo_penalties.py`
+- Xiaomi harness (mimoagent): https://github.com/XiaomiMiMo/mimoagent (branch `mimo-oss`)
+  - Code scoring `src/mimoagent/environments/datasets/opensource_code.py`
+  - Rubric judge `src/mimoagent/environments/rubric_judge.py`
+  - Docker/k8s backends `src/mimoagent/environments/docker.py` / `kubernetes.py`
+- Dataset: https://huggingface.co/datasets/XiaomiMiMo/MiMo-V2.6-RL-oss
+  (ModelScope official mirror: https://modelscope.cn/datasets/XiaomiMiMo/MiMo-V2.6-RL-oss)
+- Starting model: https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B
+  (ModelScope: https://modelscope.cn/models/XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B)
+- Task images: https://hub.docker.com/r/xiaomimimo/mimo-v2.6-rl-oss
+- Interface contract of this project: `docs/INTERFACE.md`
 
 ---
 
-## 12. 引用（Citation）
+## 11. License
+
+This project's code is licensed under **Apache-2.0**, see [`LICENSE`](LICENSE).
+
+Third-party assets retain their original licenses: ms-swift / verl / dataset **Apache-2.0**; MiMo model / mimoagent **MIT**; task images under Xiaomi's release terms.
+
+---
+
+## 12. Citation
 
 ```bibtex
 @misc{mimo_agent_grpo_swift,
@@ -565,4 +552,10 @@ python -m pytest -q            # 41 passed
 }
 ```
 
-上游工作链接见 §10。
+Upstream work links are listed in §10.
+
+---
+
+<p align="center">
+  <sub><a href="README_zh.md">简体中文</a>&nbsp;&nbsp;·&nbsp;&nbsp;<b>English</b></sub>
+</p>
